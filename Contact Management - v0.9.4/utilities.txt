@@ -1,0 +1,3702 @@
+-- ==============================================
+-- MODULE: Utilities
+--  VERSION: 0.9.4-alpha (2025-05-24)
+-- ==============================================
+-- Copyright: ©Philippe Dewost 2025
+-- Universal utility module for CCC Contact Cleaner
+--
+-- ==============================================
+-- CHANGELOG
+-- ==============================================
+--   0.9.4-alpha (2025-05-24): 
+--     • Bulletproofed deduplicateFirstHalfRepeat (used for all v2 pipelines)
+--     • Logging/diagnostics streamlined, new defensive wrappers for text conversion.
+--     • All main functions now accept/return pure text, guaranteed.
+--   0.9.0-alpha3 (2025-05-21):
+--     • Defensive file operations, session folder logic, and logging core robustified.
+--     • All calls now standardized and session-path aware.
+--   0.9.0-alpha2 (2025-05-20):
+--     • Session reporting, backup, stats exporting, and formatTimestamp standardization.
+--     • All global variables now exported.
+--   0.9.0-alpha1 (2025-05-18):
+--     • Universal split/join/replace/trim/forceText/minOfList core finalized.
+--
+-- ==============================================
+--  FEATURE REQUESTS / NEXT STEPS
+-- ==============================================
+--     * Add fallback error handling for huge file/backup operations
+--     * Enhance file path validation/normalization
+--     * QA for all cross-module functions (called from Manager and Operations)
+--     * Tune file I/O for performance
+--     * Optimize join/split/replacement for >5000-line notes
+--
+-- ==============================================
+-- KNOWN ISSUES
+-- ==============================================
+--    * None critical; all legacy bugs now isolated to caller modules.
+--    * Watch for OS X encoding bugs (UTF-8/ASCII) with “see more” and emoji lines.
+--
+-- ==============================================
+-- CORE HANDLERS & STATUS
+-- ==============================================
+--   forceText (robust)
+--   joinText (robust)
+--   splitText (robust)
+--   minOfList (robust)
+--   trimWhitespace (robust)
+--   replaceText (robust)
+--   deduplicateFirstHalfRepeat (robust)
+--   processCrossParagraphDedupe (robust)
+--   saveTextToFile, createFolderPath (robust)
+--   All logging wrappers: moduleLogDebug, safeLog, etc. (robust)
+
+(*
+Proposed Functional Regrouping for Utilities.txt:
+Based on modular design best practices and actual usage patterns, here's the recommended reorganization:
+
+Block 1: Module Core & Initialization
+applescript-- Essential module setup and configuration
+- initializeModule()
+- resetLoggingState()
+- setupFolders()
+- setSessionPaths()
+- getModuleName()
+
+Block 2: Public Text Processing Engine
+applescript-- Core text manipulation utilities (heavily used by other modules)
+- forceText()
+- replaceText()
+- joinText()
+- splitText()
+- trimWhitespace()
+- trimText()
+- collapseMultipleBlankLines()
+- deduplicateFirstHalfRepeat()
+- processCrossParagraphDedupe()
+- parseLocaleNumber()
+- minOfList()
+
+Block 3: Public File & Path Operations
+applescript-- File system operations exposed to other modules
+- createFolderPath()
+- saveTextToFile()
+- formatTimestamp()
+- createVersionedBackup()
+- findLatestBackup()
+- extractContentFromBackup()
+- manageBackupRetention()
+- listBackupEntities()
+- listBackupVersions()
+
+Block 4: Public Logging Interface
+applescript-- Main logging system for other modules
+- safeLog()
+- moduleLogDebug()
+- moduleLogInfo() 
+- moduleLogWarning()
+- moduleLogError()
+- setLogLevel()
+- setDebugMode()
+- initializeLogging()
+- processLogQueue()
+
+Block 5: Backup System Engine (Internal)
+applescript-- Comprehensive backup system (mostly internal)
+- runBackupSystem()
+- forceBackup()
+- getBackupStats()
+- initializeBackupSystem()
+- shouldPerformBackup()
+- checkVersionChange()
+- checkScriptFileChanges()
+- checkTimeBasedBackup()
+- createBackup()
+- createBackupManifest()
+- recordSuccessfulBackup()
+- cleanupOldBackups()
+- hasSessionBackupMarker()
+- readLastBackupVersion()
+- createSessionBackupMarker()
+- getScriptFolder()
+- listScriptFiles()
+- getCurrentSessionFolder()
+- getLastBackupDate()
+- countExistingBackups()
+- getBackupSpaceUsed()
+
+Block 6: Logging System Implementation (Internal)
+applescript-- Advanced logging implementation details
+- directFileLog()
+- _appendToLog()
+- _appendToLogFallback()
+- _writeBanner()
+- _levelTag()
+- _isoTimeStamp()
+- _appendFile()
+- setLoggingConfiguration()
+- logFromModule()
+- splitPath()
+- _splitEarlyLineContents()
+- checkLogFileForRotation()
+- emergencyLogging()
+
+Block 7: Internal Utilities & Helpers
+applescript-- Internal supporting functions
+- sanitizeFileName()
+- getContentHash()
+- _parentPosix()
+- getFilenameFromPath()
+- appendLineToFile()
+- updateVersionHistory()
+- computeReductionMetrics()
+
+Block 8: Unused/Alternative Utilities
+applescript-- Currently unused but potentially useful utilities
+- fileExists()
+- splitByMultipleDelimiters()
+- getWordList()
+- joinWordList()
+- listToString()
+- trimLeadingReturns()
+- getLastRecordedVersion()
+- getModulesFolder()
+- getHandlerDebug()
+
+Block 9: Deprecated & Testing
+applescript-- Deprecated APIs and testing functions
+- logError(), logInfo(), logDebug() (deprecated wrappers)
+- logSelfTest()
+- _format()
+- run() (test entry point)
+Key Recommendations:
+
+Consolidate Public API: Move the most-used handlers (Blocks 2-4) to the top for better discoverability
+Hide Implementation Details: Keep internal backup and logging implementation in separate blocks
+Mark Deprecated Code: Clearly separate deprecated handlers that should be removed
+Document Block Dependencies: Each block should document its dependencies on other blocks
+Consider Breaking Up: The backup system (Block 5) could potentially be its own module given its size and complexity
+*)
+
+
+use AppleScript version "2.4"
+use framework "Foundation"
+use scripting additions
+
+-- No log statements, no prints, nothing that runs during module load
+
+-- Define basic properties
+property MODULE_NAME : "Utilities"
+property scriptVersion : "0.9.0-alpha4"
+property LOG_LEVEL_ERROR : 0
+property LOG_LEVEL_INFO : 1
+property LOG_LEVEL_DEBUG : 2
+property logInitialized : false
+property primaryLogFile : ""
+property sessionLogFile : ""
+property logLevel : 1
+property scriptFolder : ""
+property backupFolder : ""
+property logsFolder : ""
+property reportsFolder : ""
+property logFilePath : "" -- will be filled by initialiseLogs, but never undefined
+property inLoggingFunction : false -- Flag to prevent recursion in logging
+-- Add these to the top properties section of utilities.scpt
+property initialLogQueue : {} -- Queue for logs during initialization
+property autoEscalated : false
+property consecutiveErrorCount : 0 -- for log level escalation
+property LOG_ESCALATE_AFTER_ERRORS : 1 -- flip to DEBUG after 3 consecutive ERRORs
+property gLogLevel : 1 -- shadow of logLevel for legacy helpers
+property gLoggingActive : false -- becomes true once initialiseLogging() ends
+property gLogFileAlias : missing value -- alias to the open session log file
+
+-- All code must be inside handlers, nothing at the top level!
+
+-- VERSION: 6.0.0-alpha16 (2025-04-28)
+-- PURPOSE: Enhanced module initialization with proper log queue setup
+on initializeModule()
+	--  Alpha19 patch 01 : make sure no state leaks across launches
+	-----------------------------------------------------------------------
+	resetLoggingState() -- ← add this single line, nothing else changes (Alpha19 GPT o3)
+	
+	my safeLog("Utilities", "Initializing Utilities module (minimal approach)", 2)
+	
+	-- Initialize log queue properties
+	global initialLogQueue
+	set initialLogQueue to {} -- Empty queue for initialization logs
+	
+	-- CRITICAL: Initialize global log level constants first
+	global LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_DEBUG, logLevel, inLoggingFunction
+	set LOG_LEVEL_ERROR to 0
+	set LOG_LEVEL_INFO to 1
+	set LOG_LEVEL_DEBUG to 2
+	set logLevel to 1 -- Default to INFO level
+	set inLoggingFunction to false -- Initialize recursion protection flag
+	
+	-- Initialize paths
+	global scriptFolder, backupFolder, logsFolder, reportsFolder
+	set scriptFolder to ""
+	set backupFolder to ""
+	set logsFolder to ""
+	set reportsFolder to ""
+	
+	-- Basic folder setup
+	try
+		setupFolders()
+	on error folderErr
+		-- Use direct console logging since our logger might not be ready
+		log "Error setting up folders: " & folderErr
+	end try
+	
+	my safeLog("Utilities", "Utilities module version: " & scriptVersion, 1)
+	my safeLog("Utilities", "Utilities module initialization complete", 1)
+	
+	return true
+end initializeModule
+
+--  Wipe every transient logging property that persists  between runs (properties survive AppleScript compiles).   
+------------------------------------------------------------
+on resetLoggingState()
+	-- Clear the stored path and mark logging as not initialised
+	set my logFilePath to ""
+	set my logInitialized to false
+	
+	set my initialLogQueue to {}
+	
+	-- Reset error-escalation flag so we can auto-escalate again
+	set my autoEscalated to false
+	
+	-- Reset the re-entrancy guard used inside _appendToLog
+	set my inLoggingFunction to false
+end resetLoggingState
+
+-- PURPOSE: Create basic folder structure with simple error handling
+on setupFolders()
+	-- Get base folders
+	set docsPath to path to documents folder as string
+	set cccFolder to docsPath & "CCC Script:"
+	
+	-- Initialize folder paths to empty strings
+	set scriptFolder to "" -- Will be set to session folder later
+	set backupFolder to "" -- Will be set to session's backup folder later
+	set logsFolder to "" -- Will be set to session's logs folder later
+	set reportsFolder to "" -- Will be set to session's reports folder later
+	
+	-- Only create the base CCC folder if needed
+	try
+		tell application "Finder"
+			if not (exists folder cccFolder) then
+				make new folder at docsPath with properties {name:"CCC Script"}
+				
+				-- Try to use standardized logging, but fall back to console if needed
+				try
+					my directFileLog("Utilities", "Created main CCC Script folder", 1)
+				on error
+					log "Created main CCC Script folder"
+				end try
+			else
+				try
+					my directFileLog("Utilities", "CCC Script folder already exists", 2)
+				on error
+					log "CCC Script folder already exists"
+				end try
+			end if
+		end tell
+		return true
+	on error errMsg
+		try
+			my directFileLog("Utilities", "Failed to create CCC Script folder: " & errMsg, 0)
+		on error
+			log "Failed to create CCC Script folder: " & errMsg
+		end try
+		return false
+	end try
+end setupFolders
+
+-- PURPOSE: Set session paths with cleaner separation from logging initialization
+on setSessionPaths(newSessionFolder, newBackupFolder, newLogsFolder, newReportsFolder)
+	-- Use global variables
+	global logFilePath, logsFolder, scriptFolder, backupFolder, reportsFolder
+	
+	-- Log current paths (to console only at this point)
+	log "Setting session paths:"
+	log "  Session: " & newSessionFolder
+	log "  Backups: " & newBackupFolder
+	log "  Logs: " & newLogsFolder
+	log "  Reports: " & newReportsFolder
+	
+	-- Update all folder paths
+	set scriptFolder to newSessionFolder
+	set backupFolder to newBackupFolder
+	set logsFolder to newLogsFolder
+	set reportsFolder to newReportsFolder
+	
+	-- Ensure the logs folder exists for future log initialization
+	try
+		do shell script "mkdir -p " & quoted form of (POSIX path of newLogsFolder)
+	on error mkdirErr
+		log "Warning: Error creating logs folder: " & mkdirErr
+	end try
+	
+	-- Now initialize logging properly with the new paths
+	my initializeLogging()
+	
+	log "==== SESSION PATHS UPDATED ===="
+	return true
+end setSessionPaths
+
+-------------------------------------------------------------------------------
+-- Handler: getHandlerDebug(handlerName)
+-- Version: v0.9.0 (2025-05-21)
+-- Purpose: Returns true if debug logging is enabled for a given handler.
+--          Checks for global debugMode property (driven by setDebugMode and setLogLevel).
+--          Optionally allows for forced local debug on a per-handler basis.
+-- Inputs: handlerName (string) - name of the calling handler.
+-- Output: boolean - true if debug logging is enabled for this handler.
+-------------------------------------------------------------------------------
+on getHandlerDebug(handlerName)
+	try
+		-- Always check global debugMode (this is how all modules toggle verbosity)
+		global debugMode
+		if debugMode is true then return true
+		
+		-- Optional: Forced debug just for some handlers (add as needed)
+		set forcedDebugHandlers to {"processParagraphDedupCore"} -- extend as needed
+		if handlerName is in forcedDebugHandlers then return true
+	end try
+	return false
+end getHandlerDebug
+
+
+-- ==============================================
+-- BACKUP MANAGER SYSTEM
+-- ==============================================
+-- VERSION: 6.0.0-alpha13 (2025-04-28)
+-- STATUS: STABLE - DO NOT MODIFY
+-- PURPOSE: Comprehensive script backup system that tracks scripts for backup
+--          based on version changes, file modifications, and time intervals.
+
+-- ================ CONFIGURATION ================
+-- Backup system configuration properties - FINALIZED
+property BACKUP_TIME_INTERVAL : 6 -- Hours between time-based backups in development mode
+property BACKUP_RETENTION_COUNT : 10 -- Number of backup versions to keep
+property BACKUP_ALWAYS_INCLUDE_TEXT : true -- Always include text exports of scripts
+property BACKUP_ROOT_FOLDER : "" -- Will be auto-detected
+property BACKUP_DEV_MODE : true -- Enable more frequent backups for development
+
+-- ================ CRITICAL PATHS ================
+-- These paths will be initialized at runtime - DO NOT MODIFY
+property BACKUP_HISTORY_PATH : "" -- Path to backup history file 
+property BACKUP_VERSION_PATH : "" -- Path to last backup version file
+property BACKUP_BASE_FOLDER : "" -- Base folder for all backups
+
+-- ================ PUBLIC INTERFACES ================
+-- Main entry point for the backup system - checks if backup is needed and performs it
+on runBackupSystem(mainVersion)
+	my directFileLog("BackupManager", "Starting backup system check", 1)
+	
+	-- Initialize backup system
+	initializeBackupSystem()
+	
+	-- Check for session marker first to avoid redundant backups
+	if hasSessionBackupMarker() then
+		my directFileLog("BackupManager", "Session already has backup marker - skipping backup", 1)
+		return {success:true, reason:"Already checked in this session", skipped:true}
+	end if
+	
+	-- Check if backup is needed based on multiple triggers
+	my directFileLog("BackupManager", "Evaluating backup triggers for version: " & mainVersion, 2)
+	set backupInfo to shouldPerformBackup(mainVersion)
+	
+	-- Create session marker regardless of backup decision
+	my directFileLog("BackupManager", "Creating session marker with reason: " & backupInfo's reason, 2)
+	createSessionBackupMarker(backupInfo's reason)
+	
+	-- Skip backup if not needed
+	if not backupInfo's needed then
+		my directFileLog("BackupManager", "No backup needed: " & backupInfo's reason, 1)
+		return {success:true, reason:backupInfo's reason, skipped:true}
+	end if
+	
+	-- Perform backup with specific reason
+	my directFileLog("BackupManager", "Backup needed - reason: " & backupInfo's reason, 1)
+	
+	-- Log beginning of backup creation process
+	my directFileLog("BackupManager", "Creating backup with version: " & mainVersion, 1)
+	set backupResult to createBackup(mainVersion, backupInfo's reason)
+	
+	-- Record successful backup with detailed logging
+	if backupResult's success then
+		my directFileLog("BackupManager", "Backup created successfully, recording in history", 1)
+		recordSuccessfulBackup(mainVersion, backupInfo's reason)
+		my directFileLog("BackupManager", "Backup history updated with version: " & mainVersion, 2)
+	else
+		my directFileLog("BackupManager", "Backup creation failed: " & backupResult's reason, 0)
+	end if
+	
+	return backupResult
+end runBackupSystem
+
+-- Force an immediate backup regardless of conditions
+on forceBackup(mainVersion)
+	my directFileLog("BackupManager", "User requested forced backup of version: " & mainVersion, 1)
+	
+	-- Initialize backup system if needed
+	my directFileLog("BackupManager", "Ensuring backup system is initialized", 2)
+	initializeBackupSystem()
+	
+	-- Log that we're bypassing normal triggers
+	my directFileLog("BackupManager", "Bypassing normal backup triggers for forced backup", 2)
+	
+	-- Perform backup with user-triggered reason
+	my directFileLog("BackupManager", "Creating forced backup with version: " & mainVersion, 1)
+	set backupResult to createBackup(mainVersion, "User-requested backup")
+	
+	-- Record successful backup with proper logging
+	if backupResult's success then
+		my directFileLog("BackupManager", "Forced backup created successfully, recording in history", 1)
+		recordSuccessfulBackup(mainVersion, "User-requested backup")
+		my directFileLog("BackupManager", "Backup history updated with forced backup: " & mainVersion, 2)
+		
+		-- Log details about the backup location
+		if backupResult contains "path" then
+			my directFileLog("BackupManager", "Backup saved to: " & backupResult's path, 1)
+		end if
+	else
+		-- Log details about the failure
+		my directFileLog("BackupManager", "Forced backup creation failed: " & backupResult's reason, 0)
+	end if
+	
+	return backupResult
+end forceBackup
+
+-- Get backup statistics for UX display
+on getBackupStats()
+	-- Initialize backup system
+	initializeBackupSystem()
+	
+	-- Count total backups
+	set backupCount to countExistingBackups()
+	
+	-- Get date of last backup
+	set lastBackupDate to getLastBackupDate()
+	
+	-- Get disk space used by backups (in MB)
+	set spaceUsed to getBackupSpaceUsed()
+	
+	-- Return stats bundle
+	return {backupCount:backupCount, lastBackupDate:lastBackupDate, spaceUsed:spaceUsed}
+end getBackupStats
+
+-- ================ BACKUP SYSTEM INITIALIZATION ================
+-- Initialize the backup system with global tracking and session backup folders
+-- PURPOSE: Set up backup folder structure and paths with enhanced logging
+on initializeBackupSystem()
+	-- Skip if already initialized to avoid redundant operations
+	if BACKUP_ROOT_FOLDER is not "" then
+		my directFileLog("BackupManager", "Backup system already initialized - using existing configuration", 2)
+		return true
+	end if
+	
+	my directFileLog("BackupManager", "Initializing backup system", 1)
+	
+	-- 1. Global tracking folder (persists across sessions)
+	set GLOBAL_TRACKING_FOLDER to (path to documents folder as string) & "CCC Script:"
+	my directFileLog("BackupManager", "Global tracking folder path: " & GLOBAL_TRACKING_FOLDER, 2)
+	
+	-- 2. Session-specific backup folder with backup path validation
+	global backupFolder
+	if backupFolder is not "" and backupFolder is not missing value then
+		set BACKUP_ROOT_FOLDER to backupFolder
+		my directFileLog("BackupManager", "Using session backup folder: " & BACKUP_ROOT_FOLDER, 1)
+	else
+		-- Fallback to default location with clear logging
+		set BACKUP_ROOT_FOLDER to (path to documents folder as string) & "CCC Script:Backups:"
+		my directFileLog("BackupManager", "Session backup folder not available - using default backup folder: " & BACKUP_ROOT_FOLDER, 1)
+	end if
+	
+	-- 3. Set up paths - CRITICAL: Store version tracking files in GLOBAL folder
+	set BACKUP_BASE_FOLDER to BACKUP_ROOT_FOLDER & "Scripts:"
+	
+	-- These files should be in the global folder to persist across sessions
+	set BACKUP_HISTORY_PATH to GLOBAL_TRACKING_FOLDER & "script_backup_history.txt"
+	set BACKUP_VERSION_PATH to GLOBAL_TRACKING_FOLDER & "last_backup_version.txt"
+	
+	my directFileLog("BackupManager", "Defined backup paths: BASE=" & BACKUP_BASE_FOLDER & ", HISTORY=" & BACKUP_HISTORY_PATH, 2)
+	
+	-- 4. Create folders - both session backup folder and global tracking folder
+	try
+		-- Create global tracking folder if needed
+		tell application "Finder"
+			if not (exists folder GLOBAL_TRACKING_FOLDER) then
+				make new folder at (path to documents folder) with properties {name:"CCC Script"}
+				my directFileLog("BackupManager", "Created global tracking folder: " & GLOBAL_TRACKING_FOLDER, 1)
+			else
+				my directFileLog("BackupManager", "Global tracking folder already exists", 2)
+			end if
+		end tell
+		
+		-- Create backup scripts folder
+		tell application "Finder"
+			if not (exists folder BACKUP_BASE_FOLDER) then
+				make new folder at BACKUP_ROOT_FOLDER with properties {name:"Scripts"}
+				my directFileLog("BackupManager", "Created Scripts subfolder: " & BACKUP_BASE_FOLDER, 1)
+			else
+				my directFileLog("BackupManager", "Scripts subfolder already exists", 2)
+			end if
+		end tell
+	on error createErr
+		my directFileLog("BackupManager", "Error creating folders: " & createErr, 0)
+		-- Try shell command as fallback
+		try
+			do shell script "mkdir -p " & quoted form of (POSIX path of BACKUP_BASE_FOLDER)
+			my directFileLog("BackupManager", "Created folder using shell command for: " & BACKUP_BASE_FOLDER, 1)
+		on error shellErr
+			my directFileLog("BackupManager", "Shell folder creation also failed: " & shellErr & " - backup operations may fail", 0)
+		end try
+	end try
+	
+	my directFileLog("BackupManager", "Backup system initialized successfully", 1)
+	my directFileLog("BackupManager", "Base folder: " & BACKUP_BASE_FOLDER, 1)
+	my directFileLog("BackupManager", "Version tracking files stored in: " & GLOBAL_TRACKING_FOLDER, 1)
+	
+	return true
+end initializeBackupSystem
+
+-- ================ BACKUP DECISION LOGIC ================
+-- Check if backup should be performed based on multiple triggers
+-- PURPOSE: Combined decision logic for all backup triggers with enhanced logging
+on shouldPerformBackup(mainVersion)
+	-- Use standardized logging with module name for all log messages
+	my directFileLog("BackupManager", "Checking if backup is needed", 1)
+	
+	-- 1. Check for version change (highest priority)
+	my directFileLog("BackupManager", "Checking for version changes", 2)
+	set versionResult to checkVersionChange(mainVersion)
+	if versionResult's changed then
+		my directFileLog("BackupManager", "Version change detected: " & versionResult's oldVersion & " → " & mainVersion, 1)
+		return {needed:true, reason:"Version changed from " & versionResult's oldVersion & " to " & mainVersion}
+	end if
+	
+	-- 2. Check for script file modifications
+	my directFileLog("BackupManager", "Checking for script file modifications", 2)
+	set fileResult to checkScriptFileChanges()
+	if fileResult's changed then
+		my directFileLog("BackupManager", "Modified script file detected: " & fileResult's filename, 1)
+		return {needed:true, reason:"Script file modified: " & fileResult's filename}
+	end if
+	
+	-- 3. Check for time-based backup (development mode only)
+	if BACKUP_DEV_MODE then
+		my directFileLog("BackupManager", "Development mode active - checking time-based backup triggers", 2)
+		set timeResult to checkTimeBasedBackup()
+		if timeResult's needed then
+			my directFileLog("BackupManager", "Time-based backup needed: " & timeResult's reason, 1)
+			return {needed:true, reason:"Time-based backup (dev mode): " & timeResult's reason}
+		end if
+	end if
+	
+	-- No backup needed
+	my directFileLog("BackupManager", "No backup triggers detected", 1)
+	return {needed:false, reason:"No backup triggers detected"}
+end shouldPerformBackup
+
+-- Check if version has changed from last backup
+on checkVersionChange(currentVersion)
+	try
+		-- Get last backed up version with detailed logging
+		my directFileLog("BackupManager", "Retrieving last backed up version for comparison", 2)
+		set lastVersion to readLastBackupVersion()
+		
+		my directFileLog("BackupManager", "Checking version change: Current=" & currentVersion & ", Last=" & lastVersion, 1)
+		
+		-- Perform detailed comparison with explicit logging
+		if lastVersion is "" then
+			my directFileLog("BackupManager", "No previous version found - first backup needed", 1)
+			return {changed:true, oldVersion:"(none)", newVersion:currentVersion}
+		else if lastVersion is not equal to currentVersion then
+			my directFileLog("BackupManager", "Version change detected: " & lastVersion & " → " & currentVersion, 1)
+			return {changed:true, oldVersion:lastVersion, newVersion:currentVersion}
+		else
+			my directFileLog("BackupManager", "Version unchanged: still at " & currentVersion, 2)
+			return {changed:false, oldVersion:lastVersion, newVersion:currentVersion}
+		end if
+	on error errMsg
+		my directFileLog("BackupManager", "Error in version check: " & errMsg, 0)
+		
+		-- Safety first - return true if we can't determine version (to ensure backup happens)
+		my directFileLog("BackupManager", "Triggering backup due to version check error", 0)
+		return {changed:true, oldVersion:"(error)", newVersion:currentVersion}
+	end try
+end checkVersionChange
+
+-- Check for script file modifications since last backup
+on checkScriptFileChanges()
+	my directFileLog("BackupManager", "Checking for script file modifications since last backup", 1)
+	
+	try
+		-- Get the last backup timestamp with proper logging
+		my directFileLog("BackupManager", "Retrieving last backup date for comparison", 2)
+		set lastBackupDate to getLastBackupDate()
+		my directFileLog("BackupManager", "Last backup date: " & lastBackupDate, 2)
+		
+		-- Get the module folder with proper error handling
+		my directFileLog("BackupManager", "Getting script module folder path", 2)
+		set moduleFolder to getScriptFolder()
+		
+		-- List all script files in the folder
+		my directFileLog("BackupManager", "Scanning for script files in: " & moduleFolder, 2)
+		set scriptFiles to listScriptFiles(moduleFolder)
+		my directFileLog("BackupManager", "Found " & (count of scriptFiles) & " script files to check", 2)
+		
+		-- Check each script file's modification date
+		repeat with scriptFile in scriptFiles
+			set filePath to scriptFile's path
+			set filename to scriptFile's name
+			
+			my directFileLog("BackupManager", "Checking modification date for: " & filename, 2)
+			
+			tell application "System Events"
+				set fileModDate to modification date of file filePath
+				
+				-- Compare with last backup date
+				if fileModDate > lastBackupDate then
+					my directFileLog("BackupManager", "Script modified since last backup: " & filename, 1)
+					my directFileLog("BackupManager", "Last backup: " & lastBackupDate & ", File mod: " & fileModDate, 2)
+					return {changed:true, filename:filename, path:filePath, modDate:fileModDate}
+				else
+					my directFileLog("BackupManager", "Script " & filename & " unchanged since last backup", 2)
+				end if
+			end tell
+		end repeat
+		
+		-- No modifications found
+		my directFileLog("BackupManager", "No script file modifications found since last backup", 1)
+		return {changed:false, filename:"", path:"", modDate:missing value}
+	on error errMsg
+		my directFileLog("BackupManager", "Error checking script file changes: " & errMsg, 0)
+		
+		-- If error occurs, assume no changes for safety
+		my directFileLog("BackupManager", "Assuming no changes due to error checking files", 0)
+		return {changed:false, filename:"", path:"", modDate:missing value}
+	end try
+end checkScriptFileChanges
+
+-- Check if time-based backup is needed (only in dev mode)
+on checkTimeBasedBackup()
+	my directFileLog("BackupManager", "Checking if time-based backup is needed", 1)
+	
+	try
+		-- Get the last backup timestamp with logging
+		my directFileLog("BackupManager", "Retrieving last backup date", 2)
+		set lastBackupDate to getLastBackupDate()
+		set currentDate to current date
+		
+		-- Calculate hours since last backup with detailed logging
+		set secondsSinceBackup to currentDate - lastBackupDate
+		set hoursSinceBackup to secondsSinceBackup / 3600
+		
+		my directFileLog("BackupManager", "Hours since last backup: " & hoursSinceBackup, 1)
+		
+		-- Check if we've exceeded the interval with clear decision logging
+		if hoursSinceBackup > BACKUP_TIME_INTERVAL then
+			my directFileLog("BackupManager", "Time-based backup needed: " & (round hoursSinceBackup) & " hours exceeds " & BACKUP_TIME_INTERVAL & " hour threshold", 1)
+			return {needed:true, reason:"Last backup was " & (round hoursSinceBackup) & " hours ago"}
+		else
+			-- Log the decision clearly for debugging
+			set hoursRemaining to BACKUP_TIME_INTERVAL - hoursSinceBackup
+			my directFileLog("BackupManager", "Time-based backup not needed: " & (round hoursSinceBackup) & " hours since backup, " & (round hoursRemaining) & " hours remaining until next automatic backup", 2)
+			return {needed:false, reason:"Last backup was only " & (round hoursSinceBackup) & " hours ago"}
+		end if
+	on error errMsg
+		my directFileLog("BackupManager", "Error in time-based backup check: " & errMsg, 0)
+		
+		-- If error occurs, trigger backup to be safe, with clear reasoning
+		my directFileLog("BackupManager", "Triggering backup due to error in time-based check", 0)
+		return {needed:true, reason:"Error determining last backup time"}
+	end try
+end checkTimeBasedBackup
+
+-- ================ BACKUP CREATION ================
+-- Create a complete backup of all script files in .scpt and .txt format
+on createBackup(mainVersion, backupReason)
+	my directFileLog("BackupManager", "Creating backup for version: " & mainVersion, 1)
+	
+	-- Generate timestamp for this backup
+	set timestamp to formatTimestamp(current date)
+	set versionTimestamp to mainVersion & "_" & timestamp
+	my directFileLog("BackupManager", "Generated timestamp for backup: " & versionTimestamp, 2)
+	
+	-- Create version folder
+	set versionFolderName to "v" & versionTimestamp
+	set versionFolder to BACKUP_BASE_FOLDER & versionFolderName & ":"
+	
+	my directFileLog("BackupManager", "Creating version folder: " & versionFolderName, 2)
+	
+	-- Create the folder with error handling
+	try
+		tell application "Finder"
+			-- Create version folder
+			if not (exists folder versionFolder) then
+				make new folder at BACKUP_BASE_FOLDER with properties {name:versionFolderName}
+				my directFileLog("BackupManager", "Created version folder at: " & versionFolder, 2)
+			else
+				my directFileLog("BackupManager", "Version folder already exists: " & versionFolder, 2)
+			end if
+		end tell
+	on error folderErr
+		my directFileLog("BackupManager", "Error creating version folder: " & folderErr, 0)
+		return {success:false, reason:"Failed to create backup folder: " & folderErr, version:versionTimestamp}
+	end try
+	
+	-- Get list of all script files
+	my directFileLog("BackupManager", "Getting list of script files to backup", 2)
+	set moduleFolder to getScriptFolder()
+	set scriptFiles to listScriptFiles(moduleFolder)
+	
+	-- Log the number of files to be backed up
+	my directFileLog("BackupManager", "Found " & (count of scriptFiles) & " scripts to backup", 1)
+	
+	-- Backup results
+	set backupResults to {}
+	set scriptsCopied to 0
+	set scriptsExported to 0
+	set failedScripts to {}
+	
+	-- Copy each script
+	repeat with scriptFile in scriptFiles
+		set srcPath to scriptFile's path
+		set scriptName to scriptFile's name
+		set destPath to versionFolder & scriptName
+		
+		my directFileLog("BackupManager", "Backing up script: " & scriptName, 2)
+		set scriptResult to {name:scriptName, copied:false, exported:false}
+		
+		try
+			-- 1. Copy script binary
+			tell application "Finder"
+				duplicate file srcPath to folder versionFolder
+			end tell
+			
+			set scriptResult's copied to true
+			set scriptsCopied to scriptsCopied + 1
+			my directFileLog("BackupManager", "Successfully copied script: " & scriptName, 2)
+			
+			-- 2. Export as text using osadecompile
+			if BACKUP_ALWAYS_INCLUDE_TEXT then
+				try
+					-- Create text filename (remove .scpt extension)
+					set textFilename to text 1 thru ((offset of ".scpt" in scriptName) - 1) of scriptName & ".txt"
+					set textPath to versionFolder & textFilename
+					
+					my directFileLog("BackupManager", "Exporting script as text: " & textFilename, 2)
+					
+					-- Use osadecompile to export text
+					set posixSrcPath to POSIX path of srcPath
+					set posixTextPath to POSIX path of textPath
+					do shell script "osadecompile " & quoted form of posixSrcPath & " > " & quoted form of posixTextPath
+					
+					set scriptResult's exported to true
+					set scriptsExported to scriptsExported + 1
+					my directFileLog("BackupManager", "Successfully exported script as text: " & textFilename, 2)
+				on error exportErr
+					my directFileLog("BackupManager", "Failed to export " & scriptName & " as text: " & exportErr, 0)
+				end try
+			end if
+		on error copyErr
+			my directFileLog("BackupManager", "Error copying " & scriptName & ": " & copyErr, 0)
+			set end of failedScripts to scriptName
+		end try
+		
+		set end of backupResults to scriptResult
+	end repeat
+	
+	-- Create detailed manifest
+	my directFileLog("BackupManager", "Creating backup manifest with details", 2)
+	createBackupManifest(versionFolder, mainVersion, backupReason, backupResults)
+	
+	-- Clean up old backups
+	my directFileLog("BackupManager", "Checking for old backups to clean up", 1)
+	cleanupOldBackups()
+	
+	-- Return success if at least one script was copied
+	if scriptsCopied > 0 then
+		my directFileLog("BackupManager", "Backup completed successfully: " & scriptsCopied & " scripts copied, " & scriptsExported & " exported as text", 1)
+		
+		-- Log any failures if they occurred
+		if (count of failedScripts) > 0 then
+			my directFileLog("BackupManager", "Warning: " & (count of failedScripts) & " scripts failed to copy", 0)
+		end if
+		
+		return {success:true, version:versionTimestamp, path:versionFolder, reason:backupReason, scriptsCopied:scriptsCopied, scriptsExported:scriptsExported, failedScripts:failedScripts}
+	else
+		my directFileLog("BackupManager", "Backup failed: No scripts were copied", 0)
+		return {success:false, reason:"Failed to copy any scripts", version:versionTimestamp}
+	end if
+end createBackup
+
+-- Create a manifest file with backup details
+-- PURPOSE: Document the backup contents and metadata with improved logging
+on createBackupManifest(versionFolder, mainVersion, backupReason, backupResults)
+	my directFileLog("BackupManager", "Creating backup manifest for version: " & mainVersion, 1)
+	
+	-- Create detailed manifest content
+	my directFileLog("BackupManager", "Building manifest content with backup details", 2)
+	
+	set manifestContent to "# Script Backup Manifest" & return
+	set manifestContent to manifestContent & "Version: " & mainVersion & return
+	set manifestContent to manifestContent & "Backup Date: " & ((current date) as string) & return
+	set manifestContent to manifestContent & "Trigger: " & backupReason & return & return
+	
+	-- Add backup results to manifest
+	set manifestContent to manifestContent & "## Backup Results" & return
+	
+	-- Log statistics for debugging
+	set scriptsTotal to count of backupResults
+	set scriptsCopied to 0
+	set scriptsExported to 0
+	
+	my directFileLog("BackupManager", "Processing results for " & scriptsTotal & " scripts", 2)
+	
+	repeat with result in backupResults
+		set scriptName to result's name
+		set scriptStatus to ""
+		
+		if result's copied then
+			set scriptsTotal to scriptsTotal + 1
+			set scriptStatus to "Copied"
+			if result's exported then
+				set scriptsExported to scriptsExported + 1
+				set scriptStatus to scriptStatus & ", Exported as text"
+			end if
+		else
+			set scriptStatus to "FAILED"
+		end if
+		
+		set manifestContent to manifestContent & "- " & scriptName & ": " & scriptStatus & return
+	end repeat
+	
+	-- Log manifest statistics
+	my directFileLog("BackupManager", "Manifest includes " & scriptsTotal & " scripts, " & scriptsExported & " with text exports", 2)
+	
+	-- Save manifest file using shell command with proper error handling
+	set manifestPath to versionFolder & "manifest.txt"
+	my directFileLog("BackupManager", "Saving manifest to: " & manifestPath, 2)
+	
+	try
+		set posixPath to POSIX path of manifestPath
+		do shell script "echo " & quoted form of manifestContent & " > " & quoted form of posixPath
+		
+		my directFileLog("BackupManager", "Created manifest at: " & manifestPath, 1)
+		return true
+	on error errMsg
+		my directFileLog("BackupManager", "Error creating manifest: " & errMsg, 0)
+		
+		-- Try alternate approach if shell command fails
+		try
+			set manifestFile to open for access file manifestPath with write permission
+			set eof of manifestFile to 0
+			write manifestContent to manifestFile
+			close access manifestFile
+			
+			my directFileLog("BackupManager", "Created manifest using direct file access", 1)
+			return true
+		on error altErr
+			my directFileLog("BackupManager", "All manifest creation methods failed: " & altErr, 0)
+			
+			-- Make sure file is closed if it was opened
+			try
+				close access manifestFile
+			end try
+			
+			return false
+		end try
+	end try
+end createBackupManifest
+
+-- Record successful backup in history file
+-- PURPOSE: Track backup history and save version information with improved logging
+on recordSuccessfulBackup(mainVersion, backupReason)
+	my directFileLog("BackupManager", "Recording successful backup of version: " & mainVersion, 1)
+	
+	-- Save current version using shell command
+	my directFileLog("BackupManager", "Saving current version to version tracking file", 2)
+	try
+		set posixPath to POSIX path of BACKUP_VERSION_PATH
+		do shell script "echo " & quoted form of mainVersion & " > " & quoted form of posixPath
+		my directFileLog("BackupManager", "Saved version to: " & BACKUP_VERSION_PATH, 1)
+	on error errMsg
+		my directFileLog("BackupManager", "Error saving version: " & errMsg, 0)
+		
+		-- Try alternate method if shell command fails
+		try
+			set versionFile to open for access file BACKUP_VERSION_PATH with write permission
+			set eof of versionFile to 0
+			write mainVersion to versionFile
+			close access versionFile
+			my directFileLog("BackupManager", "Saved version using direct file access", 1)
+		on error altErr
+			my directFileLog("BackupManager", "All version saving methods failed: " & altErr, 0)
+			
+			-- Make sure file is closed if it was opened
+			try
+				close access versionFile
+			end try
+		end try
+	end try
+	
+	-- Add to history file using shell command
+	my directFileLog("BackupManager", "Updating backup history file", 2)
+	try
+		set timestamp to formatTimestamp(current date)
+		set historyEntry to mainVersion & "_" & timestamp & " | " & ((current date) as string) & " | " & backupReason
+		my directFileLog("BackupManager", "Created history entry: " & historyEntry, 2)
+		
+		set posixPath to POSIX path of BACKUP_HISTORY_PATH
+		
+		-- Check if file exists with detailed logging
+		my directFileLog("BackupManager", "Checking if history file exists at: " & BACKUP_HISTORY_PATH, 2)
+		set fileCheckCmd to "test -f " & quoted form of posixPath & " && echo 'exists' || echo 'missing'"
+		set fileStatus to do shell script fileCheckCmd
+		
+		if fileStatus is "exists" then
+			-- Append to existing file
+			my directFileLog("BackupManager", "History file exists - appending new entry", 2)
+			do shell script "echo " & quoted form of historyEntry & " >> " & quoted form of posixPath
+			my directFileLog("BackupManager", "Updated history file", 1)
+		else
+			-- Create new file with header
+			my directFileLog("BackupManager", "History file doesn't exist - creating new file with header", 2)
+			set headerText to "# Script Version History" & return
+			set headerText to headerText & "# Format: versionTimestamp | creation date | backup reason" & return & return
+			
+			do shell script "echo " & quoted form of (headerText & historyEntry) & " > " & quoted form of posixPath
+			my directFileLog("BackupManager", "Created new history file", 1)
+		end if
+		
+		return true
+	on error errMsg
+		my directFileLog("BackupManager", "Error updating history: " & errMsg, 0)
+		
+		-- Try alternate method if shell command fails
+		try
+			set historyFile to open for access file BACKUP_HISTORY_PATH with write permission
+			set eof of historyFile to (get eof of historyFile)
+			write historyEntry & return to historyFile
+			close access historyFile
+			my directFileLog("BackupManager", "Updated history using direct file access", 1)
+			return true
+		on error altErr
+			my directFileLog("BackupManager", "All history update methods failed: " & altErr, 0)
+			
+			-- Make sure file is closed if it was opened
+			try
+				close access historyFile
+			end try
+			
+			return false
+		end try
+	end try
+end recordSuccessfulBackup
+
+-- Clean up old backups beyond retention count
+-- PURPOSE: Maintain backup folder size by removing old backups
+on cleanupOldBackups()
+	try
+		-- List all backup folders sorted by date (oldest first)
+		set posixBackupFolder to POSIX path of BACKUP_BASE_FOLDER
+		set listCmd to "find " & quoted form of posixBackupFolder & " -mindepth 1 -maxdepth 1 -type d | sort | head -n -" & BACKUP_RETENTION_COUNT
+		
+		set oldDirsOutput to do shell script listCmd & " 2>/dev/null || echo ''"
+		
+		-- Skip if no output or not enough backups to clean
+		if oldDirsOutput is "" then
+			return
+		end if
+		
+		-- Split into lines
+		set oldTID to AppleScript's text item delimiters
+		set AppleScript's text item delimiters to return
+		set oldDirs to text items of oldDirsOutput
+		set AppleScript's text item delimiters to oldTID
+		
+		-- Remove each old directory
+		repeat with oldDir in oldDirs
+			if oldDir is not "" then
+				my directFileLog("BackupManager", "Removing old backup: " & oldDir, 1)
+				do shell script "rm -rf " & quoted form of oldDir
+			end if
+		end repeat
+	on error errMsg
+		my directFileLog("BackupManager", "Error cleaning up old backups: " & errMsg, 0)
+	end try
+end cleanupOldBackups
+
+-- ================ SESSION MARKER MANAGEMENT ================
+-- Detect if backup has already been checked in this session
+on hasSessionBackupMarker()
+	-- Get current session folder
+	set sessionFolder to getCurrentSessionFolder()
+	if sessionFolder is "" then
+		my directFileLog("BackupManager", "No valid session folder found, assuming no marker exists", 1)
+		return false
+	end if
+	
+	-- Check for marker file DIRECTLY without calling fileExists
+	set markerPath to sessionFolder & "backup_complete.marker"
+	my directFileLog("BackupManager", "Checking for backup marker at: " & markerPath, 2)
+	
+	-- Use System Events directly rather than calling another function
+	try
+		tell application "System Events"
+			if exists file markerPath then
+				my directFileLog("BackupManager", "Backup marker found - backup already performed in this session", 1)
+				return true
+			else
+				my directFileLog("BackupManager", "Backup marker not found - no backup has been performed in this session", 2)
+				return false
+			end if
+		end tell
+	on error errMsg
+		-- On any error, assume marker doesn't exist
+		my directFileLog("BackupManager", "Error checking session marker: " & errMsg, 0)
+		return false
+	end try
+end hasSessionBackupMarker
+
+-- Read the last backup version from storage file with direct file check
+on readLastBackupVersion()
+	try
+		-- Check if version file exists DIRECTLY
+		tell application "System Events"
+			if not (exists file BACKUP_VERSION_PATH) then
+				my directFileLog("BackupManager", "Version file does not exist at: " & BACKUP_VERSION_PATH, 2)
+				return ""
+			end if
+		end tell
+		
+		my directFileLog("BackupManager", "Reading version from: " & BACKUP_VERSION_PATH, 2)
+		
+		-- Use shell commands for more reliable file access
+		try
+			set posixPath to POSIX path of BACKUP_VERSION_PATH
+			set lastVersion to do shell script "cat " & quoted form of posixPath & " 2>/dev/null || echo ''"
+			
+			if lastVersion is not "" then
+				my directFileLog("BackupManager", "Successfully read version: " & lastVersion, 2)
+				return lastVersion
+			end if
+		on error shellErr
+			my directFileLog("BackupManager", "Shell command error: " & shellErr, 0)
+			
+			-- Fall back to direct file access as backup method
+			try
+				set versionFile to open for access file BACKUP_VERSION_PATH
+				set lastVersion to read versionFile
+				close access versionFile
+				
+				if lastVersion is not "" then
+					my directFileLog("BackupManager", "Successfully read version using direct access: " & lastVersion, 2)
+					return lastVersion
+				end if
+			on error directErr
+				my directFileLog("BackupManager", "Direct file access error: " & directErr, 0)
+				try
+					close access versionFile
+				end try
+			end try
+		end try
+	on error errMsg
+		my directFileLog("BackupManager", "Error reading last backup version: " & errMsg, 0)
+	end try
+	
+	my directFileLog("BackupManager", "No version found, returning empty string", 2)
+	return ""
+end readLastBackupVersion
+
+-- Create a session marker to prevent redundant backups in the same session
+on createSessionBackupMarker(backupStatus)
+	try
+		-- Get current session folder
+		my directFileLog("BackupManager", "Getting current session folder for marker creation", 2)
+		set sessionFolder to getCurrentSessionFolder()
+		if sessionFolder is "" then
+			my directFileLog("BackupManager", "Failed to get a valid session folder", 0)
+			return false
+		end if
+		
+		-- Create marker file with status information
+		set markerPath to sessionFolder & "backup_complete.marker"
+		set markerContent to "Backup status: " & backupStatus & " at " & ((current date) as string)
+		
+		my directFileLog("BackupManager", "Creating marker at: " & markerPath, 2)
+		
+		-- Use shell command instead of direct file access
+		set posixPath to POSIX path of markerPath
+		do shell script "echo " & quoted form of markerContent & " > " & quoted form of posixPath
+		
+		my directFileLog("BackupManager", "Created session marker at: " & markerPath, 1)
+		return true
+	on error errMsg
+		my directFileLog("BackupManager", "Error creating session marker: " & errMsg, 0)
+		return false
+	end try
+end createSessionBackupMarker
+
+-- ================ BACKUP SYSTEM UTILITY FUNCTIONS ================
+-- Get the folder containing the script
+on getScriptFolder()
+	try
+		-- Try to get folder containing current script
+		set scriptPath to path to me as string
+		
+		-- Extract path using basic string operations
+		set ASTID to AppleScript's text item delimiters
+		set AppleScript's text item delimiters to ":"
+		set pathParts to text items of scriptPath
+		
+		-- Remove last item (script name)
+		set lastItemIndex to count of pathParts
+		set pathParts to items 1 thru (lastItemIndex - 1) of pathParts
+		
+		-- Rebuild path
+		set AppleScript's text item delimiters to ":"
+		set scriptFolder to pathParts as string
+		if scriptFolder does not end with ":" then
+			set scriptFolder to scriptFolder & ":"
+		end if
+		set AppleScript's text item delimiters to ASTID
+		
+		return scriptFolder
+	on error getPathErr
+		my directFileLog("BackupManager", "Error determining script folder: " & getPathErr, 0)
+		
+		-- Fallback to session folder or documents folder
+		try
+			global scriptFolder
+			if scriptFolder is not "" and scriptFolder is not missing value then
+				return scriptFolder
+			end if
+		end try
+		
+		-- Last resort - return documents folder
+		return (path to documents folder as string)
+	end try
+end getScriptFolder
+
+-- List all AppleScript files in a folder
+on listScriptFiles(folderPath)
+	set scriptFiles to {}
+	
+	try
+		tell application "Finder"
+			set fileList to every file of folder folderPath whose name extension is "scpt"
+			
+			repeat with aFile in fileList
+				set filePath to (folderPath & name of aFile) as string
+				set filename to name of aFile as string
+				
+				set end of scriptFiles to {name:filename, path:filePath}
+			end repeat
+		end tell
+	on error errMsg
+		my directFileLog("BackupManager", "Error listing script files: " & errMsg, 0)
+	end try
+	
+	return scriptFiles
+end listScriptFiles
+
+-- Format timestamp for consistent file naming
+on formatTimestamp(dateObj)
+	set y to year of dateObj as string
+	set m to text -2 thru -1 of ("0" & (month of dateObj as integer as string))
+	set d to text -2 thru -1 of ("0" & (day of dateObj as string))
+	set h to text -2 thru -1 of ("0" & (hours of dateObj as string))
+	set min to text -2 thru -1 of ("0" & (minutes of dateObj as string))
+	return y & "-" & m & "-" & d & "_" & h & "-" & min
+	-- in case you need seconds, uncomment below and comment line above
+	-- set s to text -2 thru -1 of ("0" & (seconds of dateObj as string))
+	-- return y & "-" & m & "-" & d & "_" & h & "-" & min & "-" & s
+end formatTimestamp
+
+-- Get current session folder with multiple fallbacks
+on getCurrentSessionFolder()
+	-- Try to get from global variable first
+	global scriptFolder
+	
+	-- Check if it looks like a session folder
+	if scriptFolder is not "" and scriptFolder is not missing value and scriptFolder contains "Session_" then
+		my directFileLog("BackupManager", "Using current scriptFolder as session folder: " & scriptFolder, 2)
+		return scriptFolder
+	end if
+	
+	-- If that fails, try to detect from the current log file path
+	global logFilePath
+	if logFilePath is not "" and logFilePath is not missing value then
+		my directFileLog("BackupManager", "Attempting to derive session folder from log file path: " & logFilePath, 2)
+		
+		-- Extract the session path from the log path
+		set logPathParts to my splitText(logFilePath, ":")
+		set sessionPath to ""
+		set foundSession to false
+		
+		-- Reconstruct the path up to the Session_ folder
+		repeat with i from 1 to (count of logPathParts) - 2
+			set part to item i of logPathParts
+			if part contains "Session_" then
+				set foundSession to true
+			end if
+			
+			if sessionPath is "" then
+				set sessionPath to part
+			else
+				set sessionPath to sessionPath & ":" & part
+			end if
+			
+			-- Stop when we've included the session folder
+			if foundSession and part contains "Session_" then
+				set sessionPath to sessionPath & ":"
+				exit repeat
+			end if
+		end repeat
+		
+		if foundSession then
+			my directFileLog("BackupManager", "Successfully derived session folder: " & sessionPath, 2)
+			return sessionPath
+		end if
+	end if
+	
+	-- Last resort: use the CCC Script folder
+	my directFileLog("BackupManager", "Falling back to default CCC Script folder", 1)
+	return (path to documents folder as string) & "CCC Script:"
+end getCurrentSessionFolder
+
+-- Get the date of the last backup
+on getLastBackupDate()
+	-- Default to a date in the past in case we can't determine the actual date
+	set defaultDate to (current date) - (7 * days)
+	
+	-- Check if history file exists
+	tell application "System Events"
+		if not (exists file BACKUP_HISTORY_PATH) then
+			return defaultDate
+		end if
+	end tell
+	
+	-- Read history file to get last backup date
+	try
+		-- Use shell command to get last line
+		set posixPath to POSIX path of BACKUP_HISTORY_PATH
+		set lastLineCmd to "tail -n 1 " & quoted form of posixPath
+		set lastLine to do shell script lastLineCmd
+		
+		-- Extract date (format: "6.0.0-alpha3_2025-04-25_12-10-15 | date | reason")
+		if lastLine contains " | " then
+			set dateStart to offset of " | " in lastLine
+			set afterDate to text (dateStart + 3) thru -1 of lastLine
+			
+			-- Extract until next pipe
+			set nextPipePos to offset of " | " in afterDate
+			if nextPipePos > 0 then
+				set dateStr to text 1 thru (nextPipePos - 1) of afterDate
+			else
+				set dateStr to afterDate
+			end if
+			
+			-- Try to parse date
+			try
+				set backupDate to date dateStr
+				return backupDate
+				
+			on error dateErr
+				my directFileLog("BackupManager", "Error parsing date: " & dateErr, 0)
+				return defaultDate
+			end try
+		end if
+	on error readErr
+		my directFileLog("BackupManager", "Error reading history file: " & readErr, 0)
+	end try
+	
+	-- If we get here, we couldn't get the date
+	return defaultDate
+end getLastBackupDate
+
+-- Count existing backups in the backup folder
+on countExistingBackups()
+	try
+		my directFileLog("BackupManager", "Counting existing backup versions", 2)
+		
+		-- Use shell command for reliability
+		set posixPath to POSIX path of BACKUP_BASE_FOLDER
+		set countCmd to "find " & quoted form of posixPath & " -mindepth 1 -maxdepth 1 -type d | wc -l"
+		set countOutput to do shell script countCmd
+		
+		-- Parse result
+		set backupCount to countOutput as number
+		my directFileLog("BackupManager", "Found " & backupCount & " existing backups", 1)
+		return backupCount
+	on error errMsg
+		my directFileLog("BackupManager", "Error counting backups: " & errMsg, 0)
+		return 0
+	end try
+end countExistingBackups
+
+-- Calculate disk space used by backups (in MB)
+on getBackupSpaceUsed()
+	try
+		my directFileLog("BackupManager", "Calculating disk space used by backups", 2)
+		
+		-- Use shell command
+		set posixPath to POSIX path of BACKUP_BASE_FOLDER
+		set duCmd to "du -sm " & quoted form of posixPath & " | cut -f1"
+		set duOutput to do shell script duCmd
+		
+		-- Parse result
+		set spaceUsed to duOutput as number
+		my directFileLog("BackupManager", "Backup space used: " & spaceUsed & " MB", 1)
+		return spaceUsed
+	on error errMsg
+		my directFileLog("BackupManager", "Error calculating backup space: " & errMsg, 0)
+		return 0
+	end try
+end getBackupSpaceUsed
+
+-------------------------------------------------------------------------------
+-- Handler: createVersionedBackup [CORE HANDLER - STABLE]
+-- VERSION: 6.0.0-alpha40 (2025-05-21)
+-- PURPOSE: Save a versioned backup (original/processed/vcard) for a contact,
+--          in Contact Notes subfolder, using the proven (path as alias) fix.
+--          Now uses Utilities' formatTimestamp for all date handling.
+--          Shell script fallback for ultimate reliability.
+-- RETURNS: {success:true/false, path:string, errorMessage:string}
+-------------------------------------------------------------------------------
+on createVersionedBackup(contactName, noteContent, noteType)
+	global backupFolder, utilitiesScript
+	set logPrefix to "[Utilities] createVersionedBackup: "
+	
+	if noteContent is missing value then set noteContent to ""
+	if noteType is missing value then set noteType to "original"
+	
+	-- 1. Ensure Contact Notes subfolder exists (shell, POSIX path, robust)
+	set notesBackupFolder to backupFolder & "Contact Notes:"
+	set notesBackupFolderPOSIX to POSIX path of notesBackupFolder
+	try
+		do shell script "mkdir -p " & quoted form of notesBackupFolderPOSIX
+	on error mkErr
+		my safeLog("Utilities", logPrefix & "Failed to create Contact Notes folder: " & mkErr, 0)
+		return {success:false, errorMessage:"Failed to create Contact Notes backup folder: " & mkErr}
+	end try
+	
+	-- 2. Prepare sanitized file name, using robust timestamp from Utilities
+	set cleanName to my sanitizeFileName(contactName)
+	set timestamp to ""
+	try
+		if utilitiesScript is not missing value then
+			set timestamp to utilitiesScript's formatTimestamp(current date)
+		else
+			-- Fallback, always zero-padded
+			set currentDate to current date
+			set theYear to year of currentDate as string
+			set theMonth to text -2 thru -1 of ("0" & (month of currentDate as integer))
+			set theDay to text -2 thru -1 of ("0" & (day of currentDate as string))
+			set theHour to text -2 thru -1 of ("0" & (hours of currentDate as string))
+			set theMinute to text -2 thru -1 of ("0" & (minutes of currentDate as string))
+			set theSecond to text -2 thru -1 of ("0" & (seconds of currentDate as string))
+			set timestamp to theYear & "-" & theMonth & "-" & theDay & "_" & theHour & "-" & theMinute & "-" & theSecond
+		end if
+	end try
+	set filename to cleanName & "_" & noteType & "_" & timestamp & ".txt"
+	set backupPath to notesBackupFolder & filename
+	
+	my safeLog("Utilities", logPrefix & "Backup file path: " & backupPath, 2)
+	
+	-- 3. Attempt AppleScript file write using (path as alias)
+	try
+		do shell script "touch " & quoted form of (POSIX path of backupPath) -- Ensure file exists for alias coercion
+		set fileAlias to backupPath as alias
+		set fileRef to open for access fileAlias with write permission
+		set eof of fileRef to 0
+		write noteContent to fileRef as «class utf8»
+		close access fileRef
+		my safeLog("Utilities", logPrefix & "Backup created: " & backupPath, 1)
+		return {success:true, path:backupPath, errorMessage:""}
+	on error errMsg
+		try
+			close access fileAlias
+		end try
+		my safeLog("Utilities", logPrefix & "AppleScript write error, falling back to shell: " & errMsg, 0)
+		
+		-- 4. Fallback: Write with shell (as ultimate reliability net)
+		try
+			set posixBackupPath to POSIX path of backupPath
+			do shell script "printf %s " & quoted form of noteContent & " > " & quoted form of posixBackupPath
+			my safeLog("Utilities", logPrefix & "Shell backup created: " & posixBackupPath, 1)
+			return {success:true, path:backupPath, errorMessage:""}
+		on error shellErr
+			my safeLog("Utilities", logPrefix & "Shell write error: " & shellErr, 0)
+			return {success:false, errorMessage:"AppleScript and shell write failed: " & errMsg & " | " & shellErr}
+		end try
+	end try
+end createVersionedBackup
+
+
+-- ==============================================
+-- Helper: Sanitize file names (no special chars)
+-- ==============================================
+on sanitizeFileName(theName)
+	set forbiddenChars to {":", "/", "\\", "*", "?", "\"", "<", ">", "|"}
+	set cleanName to theName
+	repeat with badChar in forbiddenChars
+		set AppleScript's text item delimiters to badChar
+		set cleanName to text items of cleanName as string
+		set AppleScript's text item delimiters to ""
+	end repeat
+	-- Collapse multiple spaces and trim
+	set AppleScript's text item delimiters to " "
+	set cleanName to text items of cleanName as string
+	set AppleScript's text item delimiters to " "
+	return cleanName
+end sanitizeFileName
+
+-------------------------------------------------------------------------------
+-- Handler: forceText
+-- VERSION: 0.9.4-alpha (2025-05-23)
+-- PURPOSE: Coerces input to text, never logs except on error.
+-------------------------------------------------------------------------------
+on forceText(val)
+	try
+		if (class of val is record) then
+			try
+				if val's text is not missing value then set val to val's text
+			end try
+		end if
+		if (class of val is list) then
+			set val to joinText(val, return) of utilitiesScript
+		end if
+		if (class of val is integer) or (class of val is real) or (class of val is boolean) then
+			set val to val as text
+		end if
+		set val to val as text
+		set val to text 1 thru (length of val) of val
+		return val
+	on error errMsg number errNum
+		try
+			moduleLogError("Utilities", "forceText ERROR: " & errMsg & " (num: " & (errNum as text) & ")")
+		end try
+		return ""
+	end try
+end forceText
+
+
+on fileExists(pathRef)
+	-- Optional DEBUG audit
+	if (my logLevel ≤ my LOG_LEVEL_DEBUG) then my directFileLog(MODULE_NAME, "Checking if file exists: " & pathRef, my LOG_LEVEL_DEBUG)
+	
+	try
+		--  The coercion to alias succeeds only if the item truly exists.
+		set _ to (pathRef as alias)
+		
+		if (my logLevel ≤ my LOG_LEVEL_DEBUG) then my directFileLog(MODULE_NAME, "File exists: " & pathRef, my LOG_LEVEL_DEBUG)
+		return true
+		
+	on error errMsg
+		-- Any error means the path is missing or malformed.
+		if (my logLevel ≤ my LOG_LEVEL_DEBUG) then my directFileLog(MODULE_NAME, "File does not exist / error: " & errMsg, my LOG_LEVEL_DEBUG)
+		return false
+	end try
+end fileExists
+
+on splitText(sourceText, delimiter)
+	if (delimiter is missing value) then set delimiter to linefeed
+	
+	--  Preserve caller’s text‑item‑delimiter state
+	set oldTIDs to AppleScript's text item delimiters
+	try
+		set AppleScript's text item delimiters to delimiter
+		set segments to sourceText's text items
+		if (segments is {}) then set segments to {sourceText} -- no split
+	on error
+		set segments to {sourceText} -- fall‑back on any coercion error
+	end try
+	set AppleScript's text item delimiters to oldTIDs
+	
+	return segments
+end splitText
+
+-------------------------------------------------------------------------------
+-- Handler: deduplicateFirstHalfRepeat
+-- VERSION: 1.0.0-alpha (2025-05-24)
+-- PURPOSE: If input is exactly X+X (no whitespace, even length), returns X.
+--          Otherwise, returns original string.
+-- INPUT: textLine (text)
+-- OUTPUT: dedupedLine (text)
+-------------------------------------------------------------------------------
+on deduplicateFirstHalfRepeat(textLine)
+	set t to textLine as text
+	set txtLen to length of t
+	if txtLen ≥ 2 and (txtLen mod 2 = 0) then
+		set halfLen to txtLen div 2
+		set firstHalf to text 1 thru halfLen of t
+		set secondHalf to text (halfLen + 1) thru -1 of t
+		if firstHalf = secondHalf then
+			return firstHalf
+		end if
+	end if
+	return t
+end deduplicateFirstHalfRepeat
+
+
+-------------------------------------------------------------------------------
+-- Handler: splitByMultipleDelimiters
+-- VERSION: 0.9.2-alpha (2025-05-23)
+-- PURPOSE: 
+--   Splits inputText at each occurrence of any marker in markerList.
+--   Only logs on error/abort, never per split.
+-- INPUT: inputText (text), markerList (list of text)
+-- OUTPUT: resultBlocks (list of text)
+-- CHANGELOG:
+--   0.9.2-alpha (2025-05-23): Infinite loop protection, minimal logging, robust output.
+-------------------------------------------------------------------------------
+on splitByMultipleDelimiters(inputText, markerList)
+	set resultBlocks to {}
+	set scanText to inputText
+	set loopCounter to 0
+	repeat
+		set loopCounter to loopCounter + 1
+		if (loopCounter > 10000) then
+			log "ABORTING: splitByMultipleDelimiters exceeded 10,000 iterations!"
+			exit repeat
+		end if
+		set earliestOffset to 0
+		set foundMarker to ""
+		repeat with m in markerList
+			set mText to m as text
+			set mOffset to offset of mText in scanText
+			if (mOffset > 0) and ((earliestOffset = 0) or (mOffset < earliestOffset)) then
+				set earliestOffset to mOffset
+				set foundMarker to mText
+			end if
+		end repeat
+		if (earliestOffset = 0) then
+			exit repeat
+		else
+			set blockEnd to earliestOffset + (length of foundMarker) - 1
+			set block to text 1 thru blockEnd of scanText
+			set end of resultBlocks to block
+			if blockEnd < (length of scanText) then
+				set scanText to text (blockEnd + 1) thru -1 of scanText
+			else
+				set scanText to ""
+				exit repeat
+			end if
+		end if
+	end repeat
+	if (scanText ≠ "") then set end of resultBlocks to scanText
+	return resultBlocks
+end splitByMultipleDelimiters
+
+-- Strips leading/trailing spaces, tabs, and line breaks from input string.
+-------------------------------------------------------------------------------
+on trimText(theText)
+	set theText to theText as text
+	repeat while theText begins with " " or theText begins with tab or theText begins with linefeed or theText begins with return
+		set theText to text 2 thru -1 of theText
+		if theText = "" then exit repeat
+	end repeat
+	repeat while theText ends with " " or theText ends with tab or theText ends with linefeed or theText ends with return
+		set theText to text 1 thru -2 of theText
+		if theText = "" then exit repeat
+	end repeat
+	return theText
+end trimText
+
+-- Split text into a list of words, handling space, tab, CR, LF
+on getWordList(someText)
+	set tempText to someText
+	set tempText to my replaceText(tempText, return, " ")
+	set tempText to my replaceText(tempText, linefeed, " ")
+	set tempText to my replaceText(tempText, tab, " ")
+	set oldDelims to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to " "
+	set wordList to text items of tempText
+	set AppleScript's text item delimiters to oldDelims
+	set cleanedList to {}
+	repeat with w in wordList
+		if (w as string) is not "" then set end of cleanedList to w
+	end repeat
+	return cleanedList
+end getWordList
+
+-- Join list of words into a single string, space-separated
+on joinWordList(wordList)
+	set oldDelims to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to " "
+	set result to wordList as text
+	set AppleScript's text item delimiters to oldDelims
+	return result
+end joinWordList
+
+(*
+    replaceText · Utilities — canonical helper (3‑param, case‑sensitive)
+*)
+on replaceText(sourceText, searchToken, replacement)
+	if sourceText is missing value then return ""
+	if searchToken is missing value or searchToken = "" then return sourceText
+	if replacement is missing value then set replacement to ""
+	
+	-- preserve caller’s TIDs
+	set oldTIDs to AppleScript's text item delimiters
+	try
+		set AppleScript's text item delimiters to searchToken
+		set segments to text items of (sourceText as string)
+		set AppleScript's text item delimiters to replacement
+		set outText to segments as text
+	on error errMsg
+		try
+			directFileLog("Utilities", "replaceText error: " & errMsg, 1)
+		end try
+		set outText to sourceText
+	end try
+	set AppleScript's text item delimiters to oldTIDs
+	return outText
+end replaceText
+
+-------------------------------------------------------------------------------
+-- Handler: collapseMultipleBlankLines
+-- VERSION: 0.9.0 alpha2 (2025-05-19)
+-- PURPOSE: Collapse all occurrences of 2 or more blank lines into a single blank line.
+--          Also trims leading/trailing blank lines.
+-------------------------------------------------------------------------------
+on collapseMultipleBlankLines(theText)
+	try
+		-- Collapse all 3+ blank lines to 2, then all 2+ blank lines to 1
+		set prevLen to -1
+		set txt to theText as text
+		repeat while prevLen ≠ (length of txt)
+			set prevLen to length of txt
+			set txt to my utilitiesScript's replaceText(txt, return & return & return, return & return)
+		end repeat
+		-- Now collapse all 2 blank lines to 1
+		set prevLen to -1
+		repeat while prevLen ≠ (length of txt)
+			set prevLen to length of txt
+			set txt to my utilitiesScript's replaceText(txt, return & return, return)
+		end repeat
+		-- Trim leading blank lines
+		repeat while txt begins with return or txt begins with linefeed
+			set txt to text 2 thru -1 of txt
+		end repeat
+		-- Trim trailing blank lines
+		repeat while txt ends with return or txt ends with linefeed
+			set txt to text 1 thru -2 of txt
+		end repeat
+		return txt
+	on error
+		return theText
+	end try
+end collapseMultipleBlankLines
+
+
+(*
+    ─────────────────────────────────────────────────────────────────────────────
+    @handler   parseLocaleNumber          --  Utilities · shared helper
+    @returns   real                       --  parsed numeric value (0.0 on failure)
+    @param     numberText   string        --  text that may contain locale‑style
+                                             thousands separators or decimal marks
+                                             e.g.  "1 234,56"  "1,234.56"  "1 234.56"
+
+    @scope     SHARED
+    @version   6.0.0‑alpha24‑c
+    @author    <your‑name>
+
+    @purpose   Parse human‑readable numbers regardless of:
+               • thousands separators: space, NBSP (U+00A0), thin‑space (U+2009),
+                 apostrophe (’), dot, or comma
+               • decimal separator being either "," or "."
+               On failure returns 0.0 (never throws).
+    ─────────────────────────────────────────────────────────────────────────────
+*)
+on parseLocaleNumber(numberText)
+	if numberText is missing value then return 0.0
+	
+	-- Normalise: coerce to string and strip exotic spaces
+	set nText to numberText as string
+	set nText to my replaceText(nText, (character id 160), "") -- NBSP U+00A0
+	set nText to my replaceText(nText, (character id 8201), "") -- thin‑space U+2009
+	set nText to my replaceText(nText, " ", "") -- plain spaces
+	
+	-- Identify decimal separator (last occurrence of "." or ",")
+	set decSep to "."
+	set lastDot to offset of "." in (reverse of characters of nText as string)
+	set lastComma to offset of "," in (reverse of characters of nText as string)
+	if lastDot > 0 or lastComma > 0 then
+		if lastDot = 0 then
+			set decSep to ","
+		else if lastComma = 0 then
+			set decSep to "."
+		else if lastDot < lastComma then
+			set decSep to "."
+		else
+			set decSep to ","
+		end if
+	end if
+	
+	-- Remove thousands separators (apostrophe, dot, comma) except the chosen decSep
+	set thousandTokens to {"’", "'", ".", ","}
+	repeat with tk in thousandTokens
+		if tk is not decSep then set nText to my replaceText(nText, tk, "")
+	end repeat
+	
+	-- Replace decimal separator with "." for AppleScript coercion
+	if decSep is "," then set nText to my replaceText(nText, ",", ".")
+	
+	-- Coerce to number
+	try
+		return nText as real
+	on error
+		try
+			my directFileLog("Utilities", "parseLocaleNumber failed on: " & numberText, 1)
+		end try
+		return 0.0
+	end try
+end parseLocaleNumber
+
+-- return the POSIX path of the parent folder of an HFS path
+on _parentPosix(hfsPath as text)
+	-- coerce to alias to let AppleScript resolve “:”: etc.
+	set hfsParent to (container of (hfsPath as alias)) as text
+	return POSIX path of hfsParent
+end _parentPosix
+
+
+-- Helper: Get minimum of a list of numbers
+on minOfList(numList)
+	set minVal to item 1 of numList
+	repeat with n in numList
+		if n < minVal then set minVal to n
+	end repeat
+	return minVal
+end minOfList
+
+-- ============================================
+-- Handler: joinText
+-- VERSION: 0.9.0-alpha3 (2025-05-21)
+-- PURPOSE: Join a list of items into text using the given delimiter, with full
+--          logging and bulletproof type conversion.
+-- CHANGELOG:
+--   - 0.9.0-alpha3: Forces all items to string, logs what is joined and result.
+-- ============================================
+on joinText(theList, theDelimiter)
+	try
+		-- Save original delimiters
+		set oldDelimiters to AppleScript's text item delimiters
+		
+		-- Defensive: force all items to text, handle missing value
+		set cleanedList to {}
+		repeat with i from 1 to (count of theList)
+			set thisItem to item i of theList
+			if thisItem is missing value then
+				set end of cleanedList to ""
+			else
+				set end of cleanedList to (thisItem as text)
+			end if
+		end repeat
+		
+		my moduleLogDebug("Utilities", "[joinText] Joining " & (count of cleanedList) & " items, delimiter='" & theDelimiter)
+		
+		-- Join using the delimiter
+		set AppleScript's text item delimiters to theDelimiter
+		set theText to cleanedList as text
+		
+		-- Restore original delimiters
+		set AppleScript's text item delimiters to oldDelimiters
+		
+		return theText
+	on error errMsg
+		set AppleScript's text item delimiters to oldDelimiters
+		my moduleLogError("Utilities", "[joinText] ERROR message:" & errMsg)
+		return ""
+	end try
+end joinText
+
+-- Safely convert a list to string with proper error handling
+on listToString(aList, delimiter)
+	-- Ensure inputs are of correct type
+	if aList is missing value then return ""
+	
+	try
+		-- Direct handling of simple lists
+		set resultString to ""
+		repeat with i from 1 to count of aList
+			-- Add the item with careful type handling
+			try
+				set thisItem to item i of aList as string
+				if i > 1 then
+					set resultString to resultString & delimiter & thisItem
+				else
+					set resultString to thisItem
+				end if
+			on error
+				-- If an item can't be converted, skip it
+				my moduleLogDebug("Utilities", "Could not convert list item to string, skipping")
+			end try
+		end repeat
+		return resultString
+	on error errMsg
+		my moduleLogDebug("Utilities", "Error in listToString: " & errMsg)
+		return ""
+	end try
+end listToString
+
+-- Remove leading and trailing whitespace with robust handling
+on trimWhitespace(theText)
+	-- Check for empty string
+	if theText is "" then return ""
+	
+	-- Trim leading whitespace
+	set trimmedText to theText
+	set textLength to length of trimmedText
+	set startIndex to 1
+	
+	repeat while startIndex ≤ textLength
+		set firstChar to text startIndex thru startIndex of trimmedText
+		if firstChar is not " " and firstChar is not tab and firstChar is not linefeed and firstChar is not return then
+			exit repeat
+		end if
+		set startIndex to startIndex + 1
+	end repeat
+	
+	if startIndex > textLength then
+		-- String was all whitespace
+		return ""
+	end if
+	
+	-- Trim trailing whitespace
+	set endIndex to textLength
+	
+	repeat while endIndex ≥ startIndex
+		set lastChar to text endIndex thru endIndex of trimmedText
+		if lastChar is not " " and lastChar is not tab and lastChar is not linefeed and lastChar is not return then
+			exit repeat
+		end if
+		set endIndex to endIndex - 1
+	end repeat
+	
+	-- Extract the trimmed portion
+	return text startIndex thru endIndex of trimmedText
+end trimWhitespace
+
+-------------------------------------------------------------------------------
+--  setLogLevel(newLevel) • authoritative setter for the whole module
+-------------------------------------------------------------------------------
+on setLogLevel(newLevel)
+	-- Coerce & clamp
+	try
+		if newLevel as integer ≤ LOG_LEVEL_ERROR then
+			set logLevel to LOG_LEVEL_ERROR
+		else if newLevel as integer ≥ LOG_LEVEL_DEBUG then
+			set logLevel to LOG_LEVEL_DEBUG
+		else
+			set logLevel to newLevel as integer
+		end if
+	on error
+		-- default to INFO on bad input
+		set logLevel to LOG_LEVEL_INFO
+	end try
+	
+	-- mirror shadow variables used during early init
+	set gLogLevel to logLevel
+	my safeLog(MODULE_NAME, "Log level now " & logLevel, LOG_LEVEL_INFO)
+	return logLevel
+end setLogLevel
+
+-------------------------------------------------------------------------------
+--  setDebugMode(isDebug) • convenience toggle (true ⇢ DEBUG / false ⇢ INFO)
+-------------------------------------------------------------------------------
+on setDebugMode(isDebug)
+	if isDebug then
+		setLogLevel(LOG_LEVEL_DEBUG)
+	else
+		setLogLevel(LOG_LEVEL_INFO)
+	end if
+	return true
+end setDebugMode
+
+-- Get the last recorded version from history
+on getLastRecordedVersion()
+	-- Try multiple locations for the history file
+	set historyPath to ""
+	
+	-- Try session folder first
+	set sessionFolder to getCurrentSessionFolder()
+	if sessionFolder is not "" then
+		set sessionHistoryPath to sessionFolder & "script_versions.history"
+		if my fileExists(sessionHistoryPath) then
+			set historyPath to sessionHistoryPath
+		end if
+	end if
+	
+	-- Fall back to standard location
+	if historyPath is "" then
+		set standardHistoryPath to (path to documents folder as string) & "CCC Script:script_versions.history"
+		if my fileExists(standardHistoryPath) then
+			set historyPath to standardHistoryPath
+		end if
+	end if
+	
+	-- If no history file found
+	if historyPath is "" then
+		log "No version history file found"
+		return ""
+	end if
+	
+	try
+		-- Use shell command to get the last line (more reliable)
+		set posixPath to POSIX path of historyPath
+		set lastLine to do shell script "tail -n 1 " & quoted form of posixPath
+		
+		-- Extract version from line like "6.0.0-alpha3_2025-04-25_10-59-53 | date"
+		if lastLine contains "_" then
+			set versionEnd to offset of "_" in lastLine
+			set versionPart to text 1 thru (versionEnd - 1) of lastLine
+			
+			log "Last recorded version: " & versionPart
+			return versionPart
+		end if
+	on error errMsg
+		log "Error getting last recorded version: " & errMsg
+		return ""
+	end try
+	
+	return ""
+end getLastRecordedVersion
+
+-- Reliably detect the folder containing script modules
+on getModulesFolder()
+	try
+		-- Get script path
+		set myPath to path to me as string
+		
+		-- Extract path using basic string operations
+		set ASTID to AppleScript's text item delimiters
+		set AppleScript's text item delimiters to ":"
+		set pathParts to text items of myPath
+		
+		-- Remove last item (script name)
+		set lastItemIndex to count of pathParts
+		set pathParts to items 1 thru (lastItemIndex - 1) of pathParts
+		
+		-- Rebuild path
+		set AppleScript's text item delimiters to ":"
+		set modulesFolder to pathParts as string
+		if modulesFolder does not end with ":" then
+			set modulesFolder to modulesFolder & ":"
+		end if
+		set AppleScript's text item delimiters to ASTID
+		
+		return modulesFolder
+	on error getPathErr
+		log "Error determining modules folder: " & getPathErr
+		
+		-- Last resort: try to use the script folder global variable
+		global scriptFolder
+		if scriptFolder is not "" and scriptFolder is not missing value then
+			return scriptFolder
+		else
+			-- Absolute last resort: return documents folder
+			return (path to documents folder as string)
+		end if
+	end try
+end getModulesFolder
+
+-------------------------------------------------------------------------------
+--  ✦  Handler: updateVersionHistory(entityName, backupType, versionTimestamp,
+--                                    contentHash, backupPath) → record
+--  VERSION: 6.0.0-alpha25+historyRefactor (2025-05-15)
+--  PURPOSE: Maintain a per-entity, per-type version history as a UTF-8 text file.
+--           Each entry: versionTimestamp|contentHash|backupPath|creationDateTime
+-------------------------------------------------------------------------------
+on updateVersionHistory(entityName as text, backupType as text, versionTimestamp as text, contentHash as text, backupPath as text)
+	global backupFolder
+	
+	-- 1 ▸ Ensure the VersionHistory folder exists
+	set historyFolder to backupFolder & "VersionHistory:"
+	my createFolderPath(historyFolder)
+	
+	-- 2 ▸ Build sanitized history file path (with .txt extension)
+	set rawID to entityName & "_" & backupType
+	set safeID to my sanitizeFileName(rawID)
+	set historyFilePath to historyFolder & safeID & "_history.txt"
+	
+	try
+		-- 3 ▸ Prepare timestamped entry
+		set dateTimeStr to my _isoTimeStamp(current date)
+		set entryLine to versionTimestamp & "|" & contentHash & "|" & backupPath & "|" & dateTimeStr
+		
+		-- 4 ▸ If first run, write header lines
+		if not my fileExists(historyFilePath) then
+			set headerLines to {¬
+				"# Version History for " & entityName & " (" & backupType & ")", ¬
+				"# Format: versionTimestamp|contentHash|backupPath|creationDateTime", ""} -- blank line
+			repeat with h in headerLines
+				my appendLineToFile(historyFilePath, h)
+			end repeat
+		end if
+		
+		-- 5 ▸ Append the new history entry
+		my appendLineToFile(historyFilePath, entryLine)
+		
+		return {success:true, historyPath:historyFilePath}
+	on error errMsg
+		my safeLog("Utilities", "updateVersionHistory failed: " & errMsg, LOG_LEVEL_ERROR)
+		return {success:false, errorMessage:errMsg}
+	end try
+end updateVersionHistory
+
+
+-- ==============================================
+-- FILE & PATH MANAGEMENT
+-- ==============================================
+
+-- ================================================================
+-- Handler: createFolderPath
+-- VERSION: 6.0.0-alpha29 (2025-05-18)
+-- PURPOSE: Robust, recursive creation of any folder path using Finder,
+--          with shell fallback. Canonical folder creation for entire project.
+-- ================================================================
+on createFolderPath(folderPath)
+	try
+		-- Use Finder to recursively build folder
+		tell application "Finder"
+			if exists folder folderPath then
+				log "Folder already exists: " & folderPath
+				return true
+			end if
+			
+			set pathComponents to my splitText(folderPath, ":")
+			set currentPath to ""
+			repeat with i from 1 to count of pathComponents
+				set component to item i of pathComponents
+				if component is not "" then
+					if currentPath is "" then
+						set currentPath to component
+					else
+						set currentPath to currentPath & ":" & component
+					end if
+					if not (exists folder currentPath) then
+						if i > 1 then
+							set parentComponents to items 1 thru (i - 1) of pathComponents
+							set parentPath to my joinText(parentComponents, ":")
+							make new folder at parentPath with properties {name:component}
+						else
+							make new folder at (path to desktop) with properties {name:component}
+						end if
+					end if
+				end if
+			end repeat
+			return true
+		end tell
+	on error errMsg
+		my safeLog("Utilities", "createFolderPath error (Finder): " & errMsg, 0)
+		try
+			set posixPath to POSIX path of folderPath
+			do shell script "mkdir -p " & quoted form of posixPath
+			my safeLog("Utilities", "createFolderPath used shell fallback: " & posixPath, 1)
+			return true
+		on error shellErr
+			my safeLog("Utilities", "createFolderPath shell fallback failed: " & shellErr, 0)
+			return false
+		end try
+	end try
+end createFolderPath
+
+-- Generate a content hash for backup change detection
+on getContentHash(theContent)
+	try
+		-- For more reliable hashing across different content types
+		if theContent is missing value then
+			return "d41d8cd98f00b204e9800998ecf8427e" -- MD5 of empty string
+		end if
+		
+		-- Convert to string for consistent hashing
+		set theString to theContent as string
+		
+		-- IMPROVED: Use a more robust approach for content hashing
+		set contentLength to length of theString
+		set hashValue to "len" & contentLength
+		
+		-- Take content samples for better hash quality
+		if contentLength > 0 then
+			-- Sample from start
+			set startSize to 50
+			if contentLength < startSize then
+				set startSize to contentLength
+			end if
+			set startSample to text 1 thru startSize of theString
+			
+			-- Calculate checksum of start sample
+			set startSum to 0
+			repeat with i from 1 to length of startSample
+				set charCode to ASCII number (character i of startSample)
+				set startSum to startSum + charCode
+			end repeat
+			
+			set hashValue to hashValue & "-s" & startSum
+			
+			-- Sample from end if long enough
+			if contentLength > 100 then
+				set endStart to contentLength - 49
+				set endSample to text endStart thru -1 of theString
+				
+				-- Calculate checksum of end sample
+				set endSum to 0
+				repeat with i from 1 to length of endSample
+					set charCode to ASCII number (character i of endSample)
+					set endSum to endSum + charCode
+				end repeat
+				
+				set hashValue to hashValue & "-e" & endSum
+			end if
+			
+			-- Sample from middle for longer content
+			if contentLength > 200 then
+				set midStart to contentLength div 2 - 25
+				set midSample to text midStart thru (midStart + 49) of theString
+				
+				-- Calculate checksum of middle sample
+				set midSum to 0
+				repeat with i from 1 to length of midSample
+					set charCode to ASCII number (character i of midSample)
+					set midSum to midSum + charCode
+				end repeat
+				
+				set hashValue to hashValue & "-m" & midSum
+			end if
+		end if
+		
+		return hashValue
+	on error errMsg
+		my directFileLog("Utilities", "Error generating content hash: " & errMsg, LOG_LEVEL_ERROR)
+		-- Fallback to timestamp-based hash
+		set currentTime to (current date) as string
+		set safeTime to my replaceText(currentTime, ":", "-")
+		return "fallback-" & safeTime
+	end try
+end getContentHash
+
+-- ==============================================
+-- BACKUP & RESTORE FUNCTIONS
+-- ==============================================
+
+-- Find the latest backup for an entity
+on findLatestBackup(entityName, backupType)
+	my moduleLogDebug("Utilities", "Finding latest backup for " & entityName & " (" & backupType & ")")
+	
+	-- Construct the entity folder path
+	global backupFolder
+	if backupFolder is missing value or backupFolder is "" then
+		setupFolders()
+	end if
+	
+	-- Get type-specific subfolder
+	set typeFolder to backupFolder & backupType & "s:"
+	
+	-- Get entity-specific folder
+	set entitySafeName to sanitizeFileName(entityName)
+	set entityFolder to typeFolder & entitySafeName & ":"
+	
+	-- Check if folder exists
+	set folderExists to false
+	try
+		tell application "System Events"
+			set folderExists to exists folder entityFolder
+		end tell
+	on error
+		set folderExists to false
+	end try
+	
+	if not folderExists then
+		my moduleLogDebug("Utilities", "No backups found - folder doesn't exist: " & entityFolder)
+		return ""
+	end if
+	
+	-- Get all backup files in the folder using more reliable shell commands
+	try
+		set posixPath to POSIX path of entityFolder
+		set listFilesCmd to "ls -t " & quoted form of posixPath & " | grep -v .DS_Store | head -n 1"
+		set latestFileName to do shell script listFilesCmd
+		
+		if latestFileName is not "" then
+			set latestPath to entityFolder & latestFileName
+			my moduleLogDebug("Utilities", "Latest backup found: " & latestPath)
+			return latestPath
+		else
+			my moduleLogDebug("Utilities", "No backup files found in folder")
+			return ""
+		end if
+	on error shellErr
+		my moduleLogError("Utilities", "Error finding latest backup via shell: " & shellErr)
+		
+		-- Fall back to Finder method
+		try
+			tell application "Finder"
+				set backupFiles to every file of folder entityFolder
+				if (count of backupFiles) is 0 then
+					my moduleLogDebug("Utilities", "No backup files found in folder")
+					return ""
+				end if
+				
+				-- Find the latest backup based on modification date
+				set latestFile to item 1 of backupFiles
+				set latestModDate to modification date of latestFile
+				
+				repeat with aFile in backupFiles
+					if modification date of aFile > latestModDate then
+						set latestFile to aFile
+						set latestModDate to modification date of aFile
+					end if
+				end repeat
+				
+				set latestPath to (entityFolder & (name of latestFile)) as string
+				my moduleLogDebug("Utilities", "Latest backup found via Finder: " & latestPath)
+				return latestPath
+			end tell
+		on error finderErr
+			my moduleLogError("Utilities", "Error finding latest backup via Finder: " & finderErr)
+			return ""
+		end try
+	end try
+end findLatestBackup
+
+-- Extract content from a backup file
+on extractContentFromBackup(backupPath)
+	my moduleLogDebug("Utilities", "Extracting content from backup: " & backupPath)
+	
+	-- First check if file exists
+	set fileExistsFlag to false
+	try
+		tell application "System Events"
+			set fileExistsFlag to exists file backupPath
+		end tell
+	on error
+		set fileExistsFlag to false
+	end try
+	
+	if not fileExistsFlag then
+		my moduleLogError("Utilities", "Backup file does not exist: " & backupPath)
+		return ""
+	end if
+	
+	-- Try using shell command first (more reliable)
+	try
+		set posixPath to POSIX path of backupPath
+		set grepCmd to "grep -A 100000 \"===== BACKUP CONTENT =====\" " & quoted form of posixPath & " | tail -n +2"
+		set extractedContent to do shell script grepCmd
+		
+		if extractedContent is not "" then
+			my moduleLogDebug("Utilities", "Successfully extracted content via shell (length: " & (length of extractedContent) & ")")
+			return extractedContent
+		end if
+	on error shellErr
+		my moduleLogError("Utilities", "Shell extraction failed: " & shellErr)
+		-- Fall back to AppleScript method
+	end try
+	
+	-- Fall back to AppleScript method
+	try
+		-- Read the backup file
+		set backupFile to open for access backupPath
+		set backupContent to read backupFile
+		close access backupFile
+		
+		-- Find the content section after the metadata header
+		set contentMarker to "===== BACKUP CONTENT ====="
+		if backupContent contains contentMarker then
+			set ASTID to AppleScript's text item delimiters
+			set AppleScript's text item delimiters to contentMarker
+			set contentParts to text items of backupContent
+			
+			if (count of contentParts) ≥ 2 then
+				-- Get everything after the marker
+				set AppleScript's text item delimiters to ""
+				set extractedContent to "" & text item 2 of contentParts
+				
+				-- Remove leading returns
+				if extractedContent starts with return & return then
+					set extractedContent to text 3 thru -1 of extractedContent
+				else if extractedContent starts with return then
+					set extractedContent to text 2 thru -1 of extractedContent
+				end if
+				
+				set AppleScript's text item delimiters to ASTID
+				my moduleLogDebug("Utilities", "Successfully extracted content via AppleScript (length: " & (length of extractedContent) & ")")
+				return extractedContent
+			end if
+			
+			set AppleScript's text item delimiters to ASTID
+		end if
+		
+		my moduleLogError("Utilities", "Could not find content section in backup")
+		return ""
+	on error errMsg
+		try
+			close access backupFile
+		end try
+		my moduleLogError("Utilities", "Error extracting content from backup: " & errMsg)
+		return ""
+	end try
+end extractContentFromBackup
+
+-- Manage backup retention (cleanup old backups)
+on manageBackupRetention(entityName, backupType, maxVersions)
+	my moduleLogDebug("Utilities", "Managing backup retention for " & entityName & " (" & backupType & ")")
+	
+	-- Default to keeping 5 versions if not specified
+	if maxVersions is missing value then set maxVersions to 5
+	
+	-- Construct the entity folder path
+	global backupFolder
+	if backupFolder is missing value or backupFolder is "" then
+		setupFolders()
+	end if
+	
+	-- Get type-specific subfolder
+	set typeFolder to backupFolder & backupType & "s:"
+	
+	-- Get entity-specific folder
+	set entitySafeName to sanitizeFileName(entityName)
+	set entityFolder to typeFolder & entitySafeName & ":"
+	
+	-- Check if folder exists
+	set folderExists to false
+	try
+		tell application "System Events"
+			set folderExists to exists folder entityFolder
+		end tell
+	on error
+		set folderExists to false
+	end try
+	
+	if not folderExists then
+		my moduleLogDebug("Utilities", "No backups found - folder doesn't exist: " & entityFolder)
+		return {success:true, reason:"No backups to clean", removed:0}
+	end if
+	
+	-- Try using shell commands first (more reliable)
+	try
+		set posixPath to POSIX path of entityFolder
+		
+		-- Count files in the folder
+		set countCmd to "ls -1 " & quoted form of posixPath & " | grep -v .DS_Store | wc -l"
+		set fileCount to do shell script countCmd
+		set fileCount to fileCount as integer
+		
+		if fileCount ≤ maxVersions then
+			my moduleLogDebug("Utilities", "Only " & fileCount & " backups exist, below threshold of " & maxVersions)
+			return {success:true, reason:"Backup count below threshold", removed:0}
+		end if
+		
+		-- Calculate how many files to remove
+		set filesToRemove to fileCount - maxVersions
+		
+		-- List files oldest first
+		set listCmd to "ls -tr " & quoted form of posixPath & " | grep -v .DS_Store | head -n " & filesToRemove
+		set oldestFiles to do shell script listCmd
+		
+		-- Split the result into a list of filenames
+		set ASTID to AppleScript's text item delimiters
+		set AppleScript's text item delimiters to return
+		set oldestFilesList to text items of oldestFiles
+		set AppleScript's text item delimiters to ASTID
+		
+		-- Delete the oldest files
+		set removedFiles to 0
+		repeat with filename in oldestFilesList
+			try
+				set deleteCmd to "rm " & quoted form of (posixPath & filename)
+				do shell script deleteCmd
+				set removedFiles to removedFiles + 1
+				my moduleLogDebug("Utilities", "Deleted old backup: " & filename)
+			on error deleteErr
+				my moduleLogError("Utilities", "Error deleting backup: " & deleteErr)
+			end try
+		end repeat
+		
+		return {success:true, reason:"Cleaned " & removedFiles & " old backups", removed:removedFiles}
+	on error shellErr
+		my moduleLogError("Utilities", "Shell command error: " & shellErr)
+		
+		-- Fall back to Finder method
+		try
+			tell application "Finder"
+				-- Get all backup files in the folder
+				set backupFiles to every file of folder entityFolder
+				set fileCount to count of backupFiles
+				
+				if fileCount ≤ maxVersions then
+					my moduleLogDebug("Utilities", "Only " & fileCount & " backups exist, below threshold of " & maxVersions)
+					return {success:true, reason:"Backup count below threshold", removed:0}
+				end if
+				
+				-- Sort files by modification date (oldest first)
+				set sortedFiles to {}
+				repeat with aFile in backupFiles
+					set end of sortedFiles to {file:aFile, modDate:modification date of aFile}
+				end repeat
+				
+				-- Sort oldest first using bubble sort
+				repeat with i from 1 to (count of sortedFiles) - 1
+					repeat with j from i + 1 to count of sortedFiles
+						if modDate of item i of sortedFiles > modDate of item j of sortedFiles then
+							-- Swap items
+							set temp to item i of sortedFiles
+							set item i of sortedFiles to item j of sortedFiles
+							set item j of sortedFiles to temp
+						end if
+					end repeat
+				end repeat
+				
+				-- Determine how many files to remove
+				set filesToRemove to fileCount - maxVersions
+				set removedFiles to 0
+				
+				-- Delete oldest files
+				repeat with i from 1 to filesToRemove
+					try
+						set fileToDelete to file of item i of sortedFiles
+						set filename to name of fileToDelete
+						delete fileToDelete
+						set removedFiles to removedFiles + 1
+						my moduleLogDebug("Utilities", "Deleted old backup: " & filename)
+					on error deleteErr
+						my moduleLogError("Utilities", "Error deleting backup: " & deleteErr)
+					end try
+				end repeat
+				
+				return {success:true, reason:"Cleaned " & removedFiles & " old backups", removed:removedFiles}
+			end tell
+		on error finderErr
+			my moduleLogError("Utilities", "Finder method error: " & finderErr)
+			return {success:false, reason:"Error cleaning backups: " & finderErr, removed:0}
+		end try
+	end try
+end manageBackupRetention
+
+-- Show all items with backups of a specific type
+on listBackupEntities(backupType)
+	my moduleLogDebug("Utilities", "Listing entities with " & backupType & " backups")
+	
+	-- Get backup type folder
+	global backupFolder
+	if backupFolder is missing value or backupFolder is "" then
+		setupFolders()
+	end if
+	
+	-- Type-specific subfolder
+	set typeFolder to backupFolder & backupType & "s:"
+	
+	-- Check if folder exists
+	set folderExists to false
+	try
+		tell application "System Events"
+			set folderExists to exists folder typeFolder
+		end tell
+	on error
+		set folderExists to false
+	end try
+	
+	if not folderExists then
+		my moduleLogDebug("Utilities", "Backup type folder doesn't exist: " & typeFolder)
+		return {}
+	end if
+	
+	-- Try shell commands first (more reliable)
+	try
+		set posixPath to POSIX path of typeFolder
+		set listCmd to "ls -1 " & quoted form of posixPath & " | grep -v .DS_Store"
+		set entitiesList to do shell script listCmd
+		
+		-- Process the results
+		set entityList to {}
+		
+		if entitiesList is not "" then
+			-- Split the result into a list
+			set ASTID to AppleScript's text item delimiters
+			set AppleScript's text item delimiters to return
+			set entitiesArray to text items of entitiesList
+			set AppleScript's text item delimiters to ASTID
+			
+			-- Process each entity
+			repeat with entityName in entitiesArray
+				try
+					-- Count versions
+					set entityPath to typeFolder & entityName & ":"
+					set versionCount to 0
+					
+					set posixEntityPath to POSIX path of entityPath
+					set countCmd to "ls -1 " & quoted form of posixEntityPath & " | grep -v .DS_Store | wc -l"
+					set versionCount to do shell script countCmd
+					set versionCount to versionCount as integer
+					
+					-- Add to list if it has backups
+					if versionCount > 0 then
+						set end of entityList to {name:entityName, path:entityPath, versionCount:versionCount}
+					end if
+				on error entityErr
+					my moduleLogError("Utilities", "Error processing entity folder: " & entityErr)
+				end try
+			end repeat
+		end if
+		
+		my moduleLogDebug("Utilities", "Found " & (count of entityList) & " entities with backups")
+		return entityList
+	on error shellErr
+		my moduleLogError("Utilities", "Shell method error: " & shellErr)
+		
+		-- Fall back to Finder method
+		try
+			tell application "Finder"
+				-- Get all entity folders
+				set entityFolders to every folder of folder typeFolder
+				
+				-- Process each entity folder
+				set entityList to {}
+				repeat with entityFolder in entityFolders
+					try
+						set entityName to name of entityFolder
+						set entityPath to (typeFolder & entityName & ":")
+						
+						-- Count versions
+						set versionCount to 0
+						if exists folder entityPath then
+							set versionFiles to every file of folder entityPath
+							set versionCount to count of versionFiles
+						end if
+						
+						-- Add to list if it has backups
+						if versionCount > 0 then
+							set end of entityList to {name:entityName, path:entityPath, versionCount:versionCount}
+						end if
+					on error entityErr
+						my moduleLogError("Utilities", "Error processing entity folder: " & entityErr)
+					end try
+				end repeat
+				
+				my moduleLogDebug("Utilities", "Found " & (count of entityList) & " entities with backups")
+				return entityList
+			end tell
+		on error finderErr
+			my moduleLogError("Utilities", "Finder method error: " & finderErr)
+			return {}
+		end try
+	end try
+end listBackupEntities
+
+-- Show all available versions for backup browsing
+on listBackupVersions(entityName, backupType)
+	my moduleLogDebug("Utilities", "Listing backup versions for " & entityName & " (" & backupType & ")")
+	
+	-- Construct path
+	global backupFolder
+	if backupFolder is missing value or backupFolder is "" then
+		setupFolders()
+	end if
+	
+	-- Type-specific subfolder
+	set typeFolder to backupFolder & backupType & "s:"
+	
+	-- Entity folder
+	set entitySafeName to sanitizeFileName(entityName)
+	set entityFolder to typeFolder & entitySafeName & ":"
+	
+	-- Check if folder exists
+	set folderExists to false
+	try
+		tell application "System Events"
+			set folderExists to exists folder entityFolder
+		end tell
+	on error
+		set folderExists to false
+	end try
+	
+	if not folderExists then
+		my moduleLogDebug("Utilities", "Entity folder doesn't exist: " & entityFolder)
+		return {}
+	end if
+	
+	-- Try shell commands first (more reliable)
+	try
+		set posixPath to POSIX path of entityFolder
+		set listCmd to "ls -lt " & quoted form of posixPath & " | grep -v .DS_Store | sed '1d' | awk '{print $9,$6,$7,$8,$5}'"
+		set versionsList to do shell script listCmd
+		
+		-- Process the results
+		set versionList to {}
+		
+		if versionsList is not "" then
+			-- Split the result into a list
+			set ASTID to AppleScript's text item delimiters
+			set AppleScript's text item delimiters to return
+			set versionsArray to text items of versionsList
+			set AppleScript's text item delimiters to ASTID
+			
+			-- Process each version
+			repeat with versionLine in versionsArray
+				try
+					-- Parse the line (format: filename date time size)
+					set ASTID to AppleScript's text item delimiters
+					set AppleScript's text item delimiters to space
+					set lineItems to text items of versionLine
+					set AppleScript's text item delimiters to ASTID
+					
+					if (count of lineItems) ≥ 4 then
+						set filename to item 1 of lineItems
+						set filePath to entityFolder & filename
+						
+						-- Parse version from filename (format: "v2025-4-16_10-30-45.txt")
+						set versionStr to ""
+						if filename starts with "v" and filename ends with ".txt" then
+							-- Extract the timestamp part
+							set versionStr to text 2 thru ((length of filename) - 4) of filename
+						else
+							-- Use what we have
+							set versionStr to filename
+						end if
+						
+						-- Format size string
+						set fileSize to item 4 of lineItems as integer
+						set sizeStr to ""
+						if fileSize < 1024 then
+							set sizeStr to fileSize & " bytes"
+						else if fileSize < (1024 * 1024) then
+							set sizeKB to (fileSize / 1024) as real
+							set sizeStr to ((round (sizeKB * 10)) / 10) & " KB"
+						else
+							set sizeMB to (fileSize / (1024 * 1024)) as real
+							set sizeStr to ((round (sizeMB * 10)) / 10) & " MB"
+						end if
+						
+						-- Format date/time string
+						set dateStr to item 2 of lineItems & " " & item 3 of lineItems
+						
+						-- Add to list
+						set end of versionList to {version:versionStr, path:filePath, timeStr:dateStr, sizeStr:sizeStr, size:fileSize}
+					end if
+				on error lineErr
+					my moduleLogError("Utilities", "Error processing version line: " & lineErr)
+				end try
+			end repeat
+		end if
+		
+		my moduleLogDebug("Utilities", "Found " & (count of versionList) & " versions")
+		return versionList
+	on error shellErr
+		my moduleLogError("Utilities", "Shell method error: " & shellErr)
+		
+		-- Fall back to Finder method
+		try
+			tell application "Finder"
+				-- Get all version files
+				set versionFiles to every file of folder entityFolder
+				set versionList to {}
+				
+				-- Process each version file
+				repeat with versionFile in versionFiles
+					try
+						set filename to name of versionFile as string
+						set filePath to (entityFolder & filename) as string
+						set fileSize to size of versionFile
+						
+						-- Parse version from filename
+						set versionStr to ""
+						if filename starts with "v" and filename ends with ".txt" then
+							-- Extract the timestamp part
+							set versionStr to text 2 thru ((length of filename) - 4) of filename
+						else
+							-- Use what we have
+							set versionStr to filename
+						end if
+						
+						-- Format display strings
+						set modDateObj to modification date of versionFile
+						set timeStr to (modDateObj as string)
+						
+						-- Format size string
+						set sizeStr to ""
+						if fileSize < 1024 then
+							set sizeStr to fileSize & " bytes"
+						else if fileSize < (1024 * 1024) then
+							set sizeKB to (fileSize / 1024) as real
+							set sizeStr to ((round (sizeKB * 10)) / 10) & " KB"
+						else
+							set sizeMB to (fileSize / (1024 * 1024)) as real
+							set sizeStr to ((round (sizeMB * 10)) / 10) & " MB"
+						end if
+						
+						-- Add to list
+						set end of versionList to {version:versionStr, path:filePath, timeStr:timeStr, sizeStr:sizeStr, size:fileSize, modDate:modDateObj}
+					on error versionErr
+						my moduleLogError("Utilities", "Error processing version file: " & versionErr)
+					end try
+				end repeat
+				
+				-- Sort by modification date (newest first)
+				if (count of versionList) > 1 then
+					-- Sort using bubble sort
+					repeat with i from 1 to (count of versionList) - 1
+						repeat with j from i + 1 to count of versionList
+							if modDate of item i of versionList < modDate of item j of versionList then
+								-- Swap items
+								set temp to item i of versionList
+								set item i of versionList to item j of versionList
+								set item j of versionList to temp
+							end if
+						end repeat
+					end repeat
+				end if
+				
+				my moduleLogDebug("Utilities", "Found " & (count of versionList) & " versions")
+				return versionList
+			end tell
+		on error finderErr
+			my moduleLogError("Utilities", "Finder method error: " & finderErr)
+			return {}
+		end try
+	end try
+end listBackupVersions
+
+-- ==============================================
+-- LOGGING SYSTEM
+-- ==============================================
+
+
+
+-- VERSION: 6.0.0-alpha25 (2025-05-13)
+-- PURPOSE: Legacy compatibility wrappers for the new logging system
+-- These are kept for backward compatibility only and should not be used in new code
+
+on logError(aMsg)
+	-- Redirect to the standard logging system with deprecation warning
+	my directFileLog("Utilities", "⚠️ DEPRECATED API: logError() called. Use directFileLog() instead.", LOG_LEVEL_ERROR)
+	my directFileLog("Utilities", aMsg, LOG_LEVEL_ERROR)
+end logError
+
+on logInfo(aMsg)
+	-- Redirect to the standard logging system with deprecation warning
+	my directFileLog("Utilities", "⚠️ DEPRECATED API: logInfo() called. Use directFileLog() instead.", LOG_LEVEL_INFO)
+	my directFileLog("Utilities", aMsg, LOG_LEVEL_INFO)
+end logInfo
+
+on logDebug(aMsg)
+	-- Redirect to the standard logging system with deprecation warning
+	my directFileLog("Utilities", "⚠️ DEPRECATED API: logDebug() called. Use directFileLog() instead.", LOG_LEVEL_DEBUG)
+	my directFileLog("Utilities", aMsg, LOG_LEVEL_DEBUG)
+end logDebug
+
+-------------------------------------------------------------------------------
+--  safeLog(aModule, aMessage, logLevelPassed)
+--  v6.0.0‑alpha24 (crash‑fix)
+--  • “isErrorMsg” variable removed (it became a bogus selector)
+--  • INFO lines that start with "ERROR:" now count toward escalation
+-------------------------------------------------------------------------------
+on safeLog(aModule, aMessage, logLevelPassed)
+	-- 0 ▸ Does this line represent an error?
+	set isError to (logLevelPassed = LOG_LEVEL_ERROR)
+	try
+		if aMessage starts with "ERROR:" then set isError to true
+	end try
+	
+	-- 1 ▸ Auto‑escalation counter
+	if isError then
+		set consecutiveErrorCount to consecutiveErrorCount + 1
+		
+		if consecutiveErrorCount ≥ LOG_ESCALATE_AFTER_ERRORS and not autoEscalated then
+			set autoEscalated to true
+			set logLevel to LOG_LEVEL_DEBUG
+			my directFileLog("⚠️", "Auto‑escalated to DEBUG after " & ¬
+				(consecutiveErrorCount as string) & " errors", LOG_LEVEL_INFO)
+		end if
+	else
+		set consecutiveErrorCount to 0
+	end if
+	
+	-- 2 ▸ Write the entry (unchanged helper)
+	my directFileLog(aModule, aMessage, logLevelPassed)
+end safeLog
+
+
+--  Filter on logLevel, queue during bootstrap, append atomically in UTF-8 once the file is ready.
+-------------------------------------------------------------------------------
+--  `_appendToLog` uses the queued logging pipeline for efficiency.
+--  `_appendToLogFallback` bypasses the queue and writes synchronously, ensuring that critical messages are not lost when the queue is inactive.
+on _appendToLog(messageLevel, msgText)
+	-- Honour current verbosity threshold
+	if messageLevel > logLevel then return
+	
+	-- Bootstrapping: queue until initialiseLogging() sets gLoggingActive + gLogFileAlias
+	if (gLoggingActive is false) or (gLogFileAlias is missing value) then
+		set end of initialLogQueue to msgText
+		return
+	end if
+	
+	-- ---------- UTF-8-safe append (replaces open-for-access block) ----------
+	try
+		set posixPath to POSIX path of gLogFileAlias
+		-- printf guarantees UTF-8; one newline added after each entry
+		do shell script "/usr/bin/printf '%s\\n' " & quoted form of msgText & " >> " & quoted form of posixPath
+	on error errMsg number errNum
+		-- Push back to queue so no data is lost, then continue
+		set end of initialLogQueue to "⚠️ [Logging] ERROR " & errNum & ": " & errMsg & return & msgText
+	end try
+end _appendToLog
+
+--  `_appendToLog` uses the queued logging pipeline for efficiency.
+--  `_appendToLogFallback` bypasses the queue and writes synchronously, ensuring that critical messages are not lost when the queue is inactive.
+on _appendToLogFallback(aModule, aMessage, aLevelNum)
+	
+	-- Guard: missing value ⇒ default to INFO (1)
+	if aLevelNum is missing value then set aLevelNum to 1
+	
+	-- Choose emoji / label
+	set {emo, lbl} to {"ℹ️", "INFO"}
+	if aLevelNum = 0 then set {emo, lbl} to {"🔴", "ERROR"}
+	if aLevelNum = 2 then set {emo, lbl} to {"🔍", "DEBUG"}
+	
+	set ts to do shell script "/bin/date '+%Y-%m-%d %H:%M:%S'"
+	set finalLine to ts & space & emo & space & "[" & aModule & "] " & lbl & ": " & aMessage
+	
+	-- Console for visibility
+	log finalLine
+	
+	-- Queue for later flush
+	try
+		set end of initialLogQueue to finalLine
+	end try
+	return true
+end _appendToLogFallback
+
+-------------------------------------------------------------------------------
+--  ✦  Handler: _writeBanner(bannerText)                                     ✦
+-------------------------------------------------------------------------------
+on _writeBanner(bannerText)
+	set ts to my _isoTimeStamp(current date)
+	my _appendToLog(LOG_LEVEL_INFO, ts & " ℹ️ [Utilities] INFO: " & bannerText)
+end _writeBanner
+
+-------------------------------------------------------------------------------
+--  ✦  Handler: directFileLog(moduleName, message, levelNum)         (α21)  ✦
+--  PURPOSE   : Unified logging entry for all modules.
+--              Now **fully wired to _appendToLogFallback** so it can never
+--              raise an exception during bootstrap or I/O errors.
+--  CHANGES   :
+--    • Early‑guard immediately redirects to _appendToLogFallback instead of
+--      duplicating its logic.
+--    • Core body wrapped in inner try/on‑error that also falls back.
+--    • Keeps auto‑escalation and queue safety unchanged.
+-------------------------------------------------------------------------------
+on directFileLog(moduleName, message, levelNum)
+	-- Default level → INFO
+	if levelNum is missing value then set levelNum to LOG_LEVEL_INFO
+	-- Feed the log level autoescalation process
+	if logLevel = LOG_LEVEL_ERROR then safeLog("ERROR", msg)
+	
+	-- 🛡 1) Bootstrap / unavailable log file → safe fallback
+	if (gLoggingActive is false) or (gLogFileAlias is missing value) then ¬
+		return my _appendToLogFallback(moduleName, message, levelNum)
+	
+	-- 2) Normal path with robust rescue
+	try
+		-- 🔺 Auto‑escalate first runtime ERROR to DEBUG
+		if (levelNum = LOG_LEVEL_ERROR) and (autoEscalated is false) then
+			set autoEscalated to true
+			my setLogLevel(LOG_LEVEL_DEBUG)
+			my _writeBanner("🔺 Auto‑escalated to DEBUG due to error")
+		end if
+		
+		-- Compose final line
+		set ts to my _isoTimeStamp(current date)
+		set {emoji, label} to {"ℹ️", "INFO"}
+		if levelNum = LOG_LEVEL_ERROR then set {emoji, label} to {"🔴", "ERROR"}
+		if levelNum = LOG_LEVEL_DEBUG then set {emoji, label} to {"🔍", "DEBUG"}
+		set logLine to ts & space & emoji & space & "[" & moduleName & "] " & label & ": " & message
+		
+		my _appendToLog(levelNum, logLine)
+		return true
+		
+	on error errMsg number errNum
+		-- 3) Any failure inside normal path → safe fallback, preserving context
+		set rescueMsg to "directFileLog failed " & errNum & ": " & errMsg & " | " & message
+		my _appendToLogFallback(moduleName, rescueMsg, LOG_LEVEL_ERROR)
+		return false
+	end try
+end directFileLog
+
+-------------------------------------------------------------------------------
+--  ✦  Helper: _levelTag(levelNum)                                           ✦
+-------------------------------------------------------------------------------
+on _levelTag(levelNum)
+	if levelNum = LOG_LEVEL_ERROR then return "ERROR"
+	if levelNum = LOG_LEVEL_DEBUG then return "DEBUG"
+	return "INFO"
+end _levelTag
+
+-------------------------------------------------------------------------------
+--  ✦  Helper: _isoTimeStamp(dt) – simple ISO formatter                      ✦
+-------------------------------------------------------------------------------
+on _isoTimeStamp(theDate)
+	-- Locale-independent ISO 8601 time stamp (system clock)
+	return do shell script "/bin/date '+%Y-%m-%d %H:%M:%S'"
+end _isoTimeStamp
+
+------------------------------------------------------------
+--  _appendFile(destAlias, textBlock)  • low‑level UTF‑8 writer  ✧ α21.1
+--  Called only by processLogQueue to flush pre‑initialisation lines.
+--  CHANGES:
+--    • Uses AppleScript’s write … as «class utf8» to guarantee UTF‑8.
+--    • Removes legacy ASCII fallback that produced "?" for emoji.
+-------------------------------------------------------------------------------
+on _appendFile(destAlias, textBlock)
+	try
+		set logHandle to open for access destAlias with write permission
+		-- ✅ Force UTF‑8 so emojis and non‑ASCII glyphs survive intact
+		write textBlock as «class utf8» to logHandle starting at eof
+		close access logHandle
+		return true
+	on error errMsg number errNum
+		try
+			close access logHandle
+		end try
+		-- Console only – avoid recursion into logging
+		log "‼️ [Logging] _appendFile failed " & errNum & ": " & errMsg
+		return false
+	end try
+end _appendFile
+
+-- Centralized logging configuration system
+-- VERSION: 6.0.0-alpha14 (2025-04-28)
+-- PURPOSE: Single point of control for all logging settings
+on setLoggingConfiguration(newLogLevel, newDebugMode)
+	-- Declare globals for configuration
+	global LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_DEBUG, logLevel, debugMode
+	
+	-- Ensure log level constants are defined
+	if LOG_LEVEL_ERROR is missing value then set LOG_LEVEL_ERROR to 0
+	if LOG_LEVEL_INFO is missing value then set LOG_LEVEL_INFO to 1
+	if LOG_LEVEL_DEBUG is missing value then set LOG_LEVEL_DEBUG to 2
+	
+	-- Set the debug mode flag if provided
+	if newDebugMode is not missing value then
+		set debugMode to newDebugMode
+		
+		-- Log the change with our enhanced directFileLog
+		my directFileLog("Utilities", "Debug mode set to: " & debugMode, LOG_LEVEL_INFO)
+		
+		-- Auto-adjust log level based on debug mode if not explicitly set
+		if newLogLevel is missing value then
+			if debugMode then
+				set newLogLevel to LOG_LEVEL_DEBUG
+			else
+				set newLogLevel to LOG_LEVEL_INFO
+			end if
+		end if
+	end if
+	
+	-- Set the log level if provided or defaulted
+	if newLogLevel is not missing value then
+		-- Validate log level (ensure it's in range 0-2)
+		if newLogLevel < 0 or newLogLevel > 2 then
+			set newLogLevel to LOG_LEVEL_INFO -- Default to INFO for invalid values
+		end if
+		
+		set logLevel to newLogLevel
+		
+		-- Get level name for logging
+		set levelName to "INFO"
+		if logLevel = LOG_LEVEL_ERROR then set levelName to "ERROR"
+		if logLevel = LOG_LEVEL_DEBUG then set levelName to "DEBUG"
+		
+		-- Log the change with our enhanced directFileLog
+		my directFileLog("Utilities", "Log level set to: " & logLevel & " (" & levelName & ")", LOG_LEVEL_INFO, 1)
+	end if
+	
+	-- Return the current configuration
+	return {logLevel:logLevel, debugMode:debugMode}
+end setLoggingConfiguration
+
+-- External module logging interface
+-- VERSION: 6.0.0-alpha14 (2025-04-28)
+-- PURPOSE: Allow other modules to log through the centralized system
+on logFromModule(moduleName, message, levelNum)
+	-- Default to INFO level if not specified
+	if levelNum is missing value then set levelNum to 1
+	return my safeLog(moduleName, message, levelNum)
+end logFromModule
+
+-- VERSION: 6.0.0-alpha19 (2025-05-01)
+-- PURPOSE: Initialize logging system with proper log file creation and queue processing
+on initializeLogging()
+	-- Declare globals
+	global logFilePath, logsFolder, scriptFolder, backupFolder, reportsFolder
+	global logInitialized, primaryLogFile, sessionLogFile
+	global LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_DEBUG, logLevel, debugMode
+	global inLoggingFunction
+	
+	-- Skip if already initialized
+	if logInitialized then return true
+	
+	-- Guard against recursion
+	if inLoggingFunction is true then
+		log "RECURSION GUARD: Avoiding recursive call to initializeLogging"
+		return false
+	end if
+	
+	-- Set recursion protection flag
+	set inLoggingFunction to true
+	
+	-- Initialize constants if needed
+	if LOG_LEVEL_ERROR is missing value then set LOG_LEVEL_ERROR to 0
+	if LOG_LEVEL_INFO is missing value then set LOG_LEVEL_INFO to 1
+	if LOG_LEVEL_DEBUG is missing value then set LOG_LEVEL_DEBUG to 2
+	
+	-- Set default logging level if needed
+	if logLevel is missing value then set logLevel to LOG_LEVEL_INFO
+	
+	-- Set default debug mode if needed
+	if debugMode is missing value then set debugMode to false
+	
+	log "Initializing logging system..."
+	
+	-- Create a timestamp for log file name
+	set timestamp to do shell script "date +%Y-%m-%d_%H-%M-%S"
+	
+	-- Check if we have a logs folder defined
+	if logsFolder is not "" and logsFolder is not missing value then
+		-- Ensure the logs folder exists with robust error handling
+		try
+			do shell script "mkdir -p " & quoted form of (POSIX path of logsFolder)
+			log "Ensured logs folder exists: " & logsFolder
+		on error mkdirErr
+			log "Warning: Error creating logs folder: " & mkdirErr
+			
+			-- Try Finder method as fallback
+			try
+				tell application "Finder"
+					if not (exists folder logsFolder) then
+						set folderParts to my splitPath(logsFolder)
+						set parentPath to folderParts's parent
+						set folderName to folderParts's name
+						
+						make new folder at parentPath with properties {name:folderName}
+						log "Created logs folder via Finder: " & logsFolder
+					end if
+				end tell
+			on error finderErr
+				log "Error creating logs folder via Finder: " & finderErr
+			end try
+		end try
+		
+		-- Create a new log file path with unique timestamp
+		set newLogPath to logsFolder & "session_log_" & timestamp & ".txt"
+		
+		-- Check if this path already exists (unlikely but possible)
+		try
+			tell application "System Events"
+				if exists file newLogPath then
+					set newLogPath to logsFolder & "session_log_" & timestamp & "_" & (random number from 1000 to 9999) & ".txt"
+				end if
+			end tell
+		end try
+		
+		-- Create log with proper headers
+		try
+			set headerText to "===== SESSION LOG CREATED " & ((current date) as string) & " =====" & return
+			set headerText to headerText & "Module: Utilities" & return
+			set headerText to headerText & "Version: " & my scriptVersion & return
+			set headerText to headerText & "Debug Mode: " & debugMode & return
+			set headerText to headerText & "Log Level: " & logLevel & return
+			set headerText to headerText & "Initialize Time: " & timestamp & return
+			set headerText to headerText & "=======================================" & return & return
+			
+			-- Create the log file using shell command (more reliable)
+			do shell script "printf '%s' " & quoted form of headerText & " > " & quoted form of (POSIX path of newLogPath)
+			
+			-- Set log variables
+			set logFilePath to newLogPath
+			
+			-- Alpha 21 Patch GPT o3
+			set gLogLevel to logLevel
+			set gLoggingActive to true
+			set gLogFileAlias to (logFilePath as alias)
+			
+			
+			set primaryLogFile to newLogPath -- Use same file for primary/session logs
+			set sessionLogFile to newLogPath
+			set logInitialized to true
+			
+			log "✅ Logging system initialized: " & logFilePath
+			
+			-- Process any queued logs now that we have a file to write to
+			my processLogQueue()
+			
+			-- Reset recursion flag
+			set inLoggingFunction to false
+			return true
+		on error logErr
+			log "Error creating session log: " & logErr
+			
+			-- Try direct file access as fallback
+			try
+				set logFile to open for access (POSIX file newLogPath) with write permission
+				write headerText to logFile
+				close access logFile
+				
+				-- Set log variables
+				set logFilePath to newLogPath
+				set primaryLogFile to newLogPath
+				set sessionLogFile to newLogPath
+				set logInitialized to true
+				
+				log "✅ Logging system initialized (fallback method): " & logFilePath
+				
+				-- Process queued logs with fallback method too
+				my processLogQueue()
+				
+				-- Reset recursion flag
+				set inLoggingFunction to false
+				return true
+			on error directErr
+				log "Direct file access also failed: " & directErr
+				-- Will fall through to failure case
+			end try
+		end try
+	end if
+	
+	-- If we get here, we either don't have a logs folder or couldn't create the log file
+	log "No logs folder available or couldn't create log file - logging will default to fallback mechanisms"
+	
+	-- Even with failure, try to flush queued messages to console
+	my processLogQueue()
+	
+	-- Reset recursion flag
+	set inLoggingFunction to false
+	return false
+end initializeLogging
+
+-- Helper function to split a path into parent and name
+-- VERSION: 6.0.0-alpha15 (2025-04-28)
+-- PURPOSE: Safely extract parent path and folder name from a path
+on splitPath(thePath)
+	-- Find the last colon
+	set lastColonPos to -1
+	repeat with i from (length of thePath) to 1 by -1
+		if character i of thePath is ":" then
+			set lastColonPos to i
+			exit repeat
+		end if
+	end repeat
+	
+	if lastColonPos > 0 then
+		set parentPath to text 1 thru lastColonPos of thePath
+		set folderName to text (lastColonPos + 1) thru -1 of thePath
+		
+		-- Remove trailing colon from folder name if present
+		if folderName ends with ":" then
+			set folderName to text 1 thru ((length of folderName) - 1) of folderName
+		end if
+		
+		return {parent:parentPath, name:folderName}
+	else
+		-- Default to desktop if path can't be parsed
+		return {parent:(path to desktop as string), name:"CCC_Logs"}
+	end if
+end splitPath
+
+-- CRITICAL: Every function that uses MODULE_NAME must have this helper
+on getModuleName()
+	-- This is a safer way to get the module name without relying on global/property variables
+	return "Utilities"
+end getModuleName
+
+------------------------------------------------------------
+--  processLogQueue • writes queued bootstrap lines to disk
+------------------------------------------------------------
+on processLogQueue()
+	-- Nothing to flush
+	if initialLogQueue is {} then return true
+	
+	try
+		----------------------------------------------------
+		-- Rebuild each queued line with ISO timestamp + emoji
+		----------------------------------------------------
+		set rebuilt to {}
+		repeat with q in initialLogQueue
+			set {lvl, plainMsg} to _splitEarlyLineContents(q)
+			
+			set {emo, lab} to {"ℹ️", "INFO"}
+			if lvl = LOG_LEVEL_ERROR then set {emo, lab} to {"🔴", "ERROR"}
+			if lvl = LOG_LEVEL_DEBUG then set {emo, lab} to {"🔍", "DEBUG"}
+			
+			set end of rebuilt to _isoTimeStamp(current date) & space & emo & space & plainMsg
+		end repeat
+		
+		-- Join all rebuilt lines
+		set queuedBlock to my joinText(rebuilt, return) & return
+		
+		-- Ensure we have a valid alias
+		if gLogFileAlias is missing value then set gLogFileAlias to (logFilePath as alias)
+		
+		-- Append in one atomic write
+		my _appendFile(gLogFileAlias, queuedBlock)
+		
+		-- Clear queue
+		set initialLogQueue to {}
+		return true
+		
+	on error errMsg number errNum
+		log "‼️ [Logging] processLogQueue failed " & errNum & ": " & errMsg
+		return false
+	end try
+end processLogQueue
+
+
+------------------------------------------------------------
+--  _splitEarlyLineContents(q) → {level, plainMsg}
+--  Expects original earlyText built like:
+--    "[Module] LEVEL: message"
+------------------------------------------------------------
+on _splitEarlyLineContents(q)
+	-- Default to INFO if parse fails
+	set lvl to LOG_LEVEL_INFO
+	set plainMsg to q as text
+	
+	try
+		-- Extract leading “[Module]” and level tag
+		set AppleScript's text item delimiters to "] "
+		set tmp to text item 2 of q -- "LEVEL: message"
+		set AppleScript's text item delimiters to ": "
+		set lvlTag to text item 1 of tmp -- "INFO" / "DEBUG" / "ERROR"
+		set plainMsg to text item 2 of tmp -- "message"
+		
+		if lvlTag is "DEBUG" then set lvl to LOG_LEVEL_DEBUG
+		if lvlTag is "ERROR" then set lvl to LOG_LEVEL_ERROR
+	end try
+	
+	set AppleScript's text item delimiters to {""}
+	return {lvl, plainMsg}
+end _splitEarlyLineContents
+
+
+-- ADDED: Separate function to check and perform log rotation
+-- VERSION: 6.0.0-alpha15 (2025-04-28)
+-- PURPOSE: More reliable log file rotation with better error handling
+on checkLogFileForRotation(currentLogPath)
+	global logsFolder
+	-- Alpha19 debug fix
+	-- Silence the size message unless we are at DEBUG level *and*
+	-- the file is >75 % of the rotation threshold OR a rotation just happened
+	if logLevel = LOG_LEVEL_DEBUG then
+		set rotationThreshold to 1024 * 1024 -- 1 MB
+		-- Claude 3.7 Alpha19.1 fix replacing fPath with currentLogPath
+		set fileSize to (do shell script "stat -f%z " & quoted form of POSIX path of currentLogPath) as integer
+		if fileSize > (rotationThreshold * 0.75) then my directFileLog("Utilities", "Log file size: " & fileSize & ¬
+			" bytes (Rotation threshold: " & rotationThreshold & " bytes)", LOG_LEVEL_DEBUG)
+	end if
+	try
+		-- Check if the file exists first
+		tell application "System Events"
+			if not (exists file currentLogPath) then
+				return false -- No rotation needed for non-existent file
+			end if
+		end tell
+		
+		-- Get file size using shell command for reliability
+		set posixPath to POSIX path of currentLogPath
+		set fileSizeCmd to "stat -f%z " & quoted form of posixPath & " 2>/dev/null || echo '0'"
+		set fileSize to do shell script fileSizeCmd
+		
+		-- Convert to number and check size (1MB threshold)
+		set fileSize to fileSize as integer
+		
+		-- Debug output for tracking rotation decisions
+		log "Log file size: " & fileSize & " bytes (Rotation threshold: 1048576 bytes)"
+		
+		-- Only rotate if size exceeds threshold
+		if fileSize > 1048576 then -- Over 1MB
+			log "Log file size exceeds 1MB, initiating rotation..."
+			
+			-- FIXED: Get just the filename without path for better naming
+			set currentLogFilename to getFilenameFromPath(currentLogPath)
+			
+			-- Generate a new timestamp for rotated log
+			set newTimestamp to do shell script "date '+%Y-%m-%d_%H-%M-%S'"
+			
+			-- IMPROVED: Create a more distinct filename for the rotated log
+			set rotatedFilename to "rotated_" & newTimestamp & "_" & currentLogFilename
+			set rotatedPath to logsFolder & rotatedFilename
+			
+			-- FIXED: Ensure we're not rotating to the same path
+			if rotatedPath is equal to currentLogPath then
+				set rotatedPath to logsFolder & "rotated_" & newTimestamp & "_" & (random number from 1000 to 9999) & ".txt"
+			end if
+			
+			-- Move current log to rotated path
+			try
+				-- Use shell mv command for more reliability
+				do shell script "mv " & quoted form of posixPath & " " & quoted form of (POSIX path of rotatedPath)
+				log "Log rotated to: " & rotatedPath
+				
+				-- Create new log file with rotation notice
+				set rotationText to "===== LOG ROTATED AT " & ((current date) as string) & " =====" & return
+				set rotationText to rotationText & "Previous log: " & rotatedPath & return
+				set rotationText to rotationText & "Rotation reason: File exceeded 1MB size limit" & return
+				set rotationText to rotationText & "=======================================" & return & return
+				
+				do shell script "echo " & quoted form of rotationText & " > " & quoted form of posixPath
+				
+				-- Add log entry about rotation
+				set rotationEntry to do shell script "date '+%Y-%m-%d %H:%M:%S'"
+				set rotationEntry to rotationEntry & " 🔄 [SYSTEM] INFO: Log file rotated due to size (over 1MB)"
+				do shell script "echo " & quoted form of rotationEntry & " >> " & quoted form of posixPath
+				
+				return true
+			on error mvErr
+				log "Error rotating log file: " & mvErr
+				return false
+			end try
+		else
+			return false -- No rotation needed
+		end if
+	on error checkErr
+		log "Error checking log file for rotation: " & checkErr
+		return false
+	end try
+end checkLogFileForRotation
+
+-- ADDED: Extract filename from a full path
+-- VERSION: 6.0.0-alpha15 (2025-04-28)
+-- PURPOSE: Helper to get just the filename part from a full path
+on getFilenameFromPath(fullPath)
+	-- Find the last colon in the path
+	set lastColonPos to 0
+	repeat with i from (length of fullPath) to 1 by -1
+		if character i of fullPath is ":" then
+			set lastColonPos to i
+			exit repeat
+		end if
+	end repeat
+	
+	-- Extract the filename part
+	if lastColonPos > 0 then
+		return text (lastColonPos + 1) thru -1 of fullPath
+	else
+		-- Fallback if no colon found
+		return fullPath
+	end if
+end getFilenameFromPath
+
+-- ADDED: Emergency logging as a separate function
+-- VERSION: 6.0.0-alpha15 (2025-04-28)
+-- PURPOSE: More robust fallback logging mechanism
+on emergencyLogging(logEntry)
+	try
+		-- Try to find any log file in logs folder
+		global logsFolder, logFilePath
+		
+		-- IMPROVED: Try to use the logs folder if available
+		if logsFolder is not "" and logsFolder is not missing value then
+			-- Create a new emergency log file
+			set emergencyTimestamp to do shell script "date '+%Y-%m-%d_%H-%M-%S'"
+			set emergencyPath to logsFolder & "emergency_log_" & emergencyTimestamp & ".txt"
+			
+			-- Create with proper header
+			set headerText to "===== EMERGENCY LOG CREATED " & emergencyTimestamp & " =====" & return
+			headerText to headerText & "Created due to failure in primary logging system" & return
+			headerText to headerText & "=======================================" & return & return
+			
+			do shell script "echo " & quoted form of (headerText & logEntry) & " > " & quoted form of (POSIX path of emergencyPath)
+			
+			-- Update primary log path if possible
+			if logFilePath is missing value or logFilePath is "" then
+				set logFilePath to emergencyPath
+			end if
+			
+			log "Created emergency log at: " & emergencyPath
+			return true
+		end if
+		
+		-- If that failed, try CCC Script folder
+		set cccLogFolder to (path to documents folder as string) & "CCC Script:Logs:"
+		
+		-- Ensure the folder exists
+		do shell script "mkdir -p " & quoted form of (POSIX path of cccLogFolder)
+		
+		-- Generate a new log filename with timestamp
+		set newTimestamp to do shell script "date '+%Y-%m-%d_%H-%M-%S'"
+		set newLogPath to POSIX path of (cccLogFolder & "emergency_log_" & newTimestamp & ".txt")
+		
+		do shell script "echo " & quoted form of ("===== EMERGENCY LOG =====" & return & logEntry) & " > " & quoted form of newLogPath
+		return true
+		
+	on error emergencyErr
+		-- Final fallback: Desktop
+		try
+			set desktopPath to (path to desktop folder as string) & "CMS_emergency_log.txt"
+			
+			-- Check if file exists
+			set fileExists to false
+			try
+				tell application "System Events"
+					set fileExists to exists file desktopPath
+				end tell
+			end try
+			
+			if fileExists then
+				-- Append to existing file
+				do shell script "echo " & quoted form of logEntry & " >> " & quoted form of (POSIX path of desktopPath)
+			else
+				-- Create new file with header
+				set headerText to "===== EMERGENCY LOG =====" & return
+				do shell script "echo " & quoted form of (headerText & logEntry) & " > " & quoted form of (POSIX path of desktopPath)
+			end if
+			
+			return true
+		on error finalErr
+			log "All logging methods failed. Console-only logging active."
+			return false
+		end try
+	end try
+end emergencyLogging
+
+-- ------------------------------------------------------------------
+--  Public shim – keeps old call-sites working
+-- ------------------------------------------------------------------
+on moduleLogDebug(theModule, theMessage)
+	my directFileLog(theModule, theMessage, LOG_LEVEL_DEBUG)
+end moduleLogDebug
+
+on moduleLogInfo(theModule, theMessage)
+	my directFileLog(theModule, theMessage, LOG_LEVEL_INFO)
+end moduleLogInfo
+
+on moduleLogWarning(theModule, theMessage)
+	my directFileLog(theModule, "⚠️ WARNING: " & theMessage, LOG_LEVEL_INFO)
+end moduleLogWarning
+
+on moduleLogError(theModule, theMessage)
+	my directFileLog(theModule, theMessage, LOG_LEVEL_ERROR)
+end moduleLogError
+
+
+-- ======
+-- GENERAL TOOLS, TEXT & FILE HANDLERS
+-- ======
+
+-------------------------------------------------------------------------------
+--  ✦  Helper: appendLineToFile(filePath, lineText) → boolean
+--  VERSION: 6.0.0-alpha25+historyRefactor (2025-05-15)
+--  PURPOSE: Append `lineText` plus a trailing LF to `filePath`, creating
+--           the file if it doesn’t exist. Logs and returns false on failure.
+-------------------------------------------------------------------------------
+on appendLineToFile(filePath as text, lineText as text)
+	try
+		set fRef to open for access filePath with write permission
+		write (lineText & return) to fRef starting at eof
+		close access fRef
+		return true
+	on error errMsg
+		try
+			close access fRef
+		end try
+		my safeLog("Utilities", "appendLineToFile failed: " & errMsg, LOG_LEVEL_ERROR)
+		return false
+	end try
+end appendLineToFile
+
+
+
+-- Trim all leading returns from a text block
+on trimLeadingReturns(txt as text)
+	repeat while txt begins with return
+		set txt to text 2 thru -1 of txt
+	end repeat
+	return txt
+end trimLeadingReturns
+
+-- ============================================
+--  processCrossParagraphDedupe(txt) → text
+--
+--  Splits txt on blank lines (double-LF), then collapses any pair of
+--  consecutive paragraphs whose “normalized” content (all LFs → spaces,
+--  trimmed) is identical. Reassembles with double-LF.
+-- ============================================
+on processCrossParagraphDedupe(txt as text)
+	set oldTID to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to linefeed & linefeed
+	set paraList to text items of txt
+	
+	set cleanedParas to {}
+	set prevNorm to ""
+	repeat with p in paraList
+		set thisPara to p as text
+		-- normalize: replace LFs with spaces, then trim
+		set flat to replaceText(thisPara, linefeed, " ")
+		set norm to trimWhitespace(flat)
+		if norm ≠ prevNorm then
+			copy thisPara to end of cleanedParas
+			set prevNorm to norm
+		end if
+	end repeat
+	
+	set AppleScript's text item delimiters to linefeed & linefeed
+	set resultText to cleanedParas as text
+	
+	set AppleScript's text item delimiters to oldTID
+	return resultText
+end processCrossParagraphDedupe
+
+
+-------------------------------------------------------------------------------
+-- computeReductionMetrics(charsRemoved, originalLength) → {kb:real, pct:real}
+-- Returns KB removed and percent reduction (0–100).
+-- Pure function, no side-effects.
+-------------------------------------------------------------------------------
+on computeReductionMetrics(charsRemoved, originalLength)
+	-- KB reduction
+	set kb to 0
+	if charsRemoved > 0 then set kb to (charsRemoved / 1024.0)
+	-- Percent reduction
+	set pct to 0
+	if originalLength > 0 then set pct to (charsRemoved / originalLength) * 100
+	return {kb:kb, pct:pct}
+end computeReductionMetrics
+
+-- =============================================================================
+-- Handler: saveTextToFile
+-- VERSION: 1.0.3-fix (2025-05-27)
+-- PURPOSE: Minimal, robust UTF-8 file writer. Accepts HFS path or alias.
+-- Uses (hfsPath as alias) trick, which is the only way to make this bulletproof in all AppleScript environments.
+--          Caller must ensure parent folder and file exist (see usage).
+--          Logs success and errors using standard logging system.
+--          Returns true on success, false on failure.
+--          FIXED: Variable name mismatch causing -1700 error.
+-- =============================================================================
+on saveTextToFile(theText, hfsPath)
+	my directFileLog("Utilities", "[saveTextToFile] Entry. theText class: " & (class of theText as text) & ", hfsPath class: " & (class of hfsPath as text), LOG_LEVEL_DEBUG)
+	try
+		set fileAlias to (hfsPath as alias) -- CRITICAL fix
+		set fRef to open for access fileAlias with write permission
+		set eof of fRef to 0
+		write theText as «class utf8» to fRef
+		close access fRef
+		my directFileLog("Utilities", "Saved file to: " & hfsPath, LOG_LEVEL_INFO)
+		return true
+	on error errMsg
+		try
+			close access (hfsPath as alias)
+		end try
+		my directFileLog("Utilities", "saveTextToFile failed: " & errMsg, LOG_LEVEL_ERROR)
+		return false
+	end try
+end saveTextToFile
+
+-- ==============================================
+-- TESTING - run handler 
+-- ==============================================
+
+on run
+	my logSelfTest()
+	
+	initializeModule()
+	
+	-- Test backup functions
+	log "Testing backup functions..."
+	
+	-- 1. Test createVersionedBackup
+	set testEntity to "TestContact"
+	set testContent to "This is test content for backup testing."
+	set backupResult to createVersionedBackup(testEntity, testContent, "test")
+	
+	if backupResult's success then
+		log "✅ createVersionedBackup test passed: " & backupResult's path
+		
+		-- 2. Test findLatestBackup
+		set latestBackup to findLatestBackup(testEntity, "test")
+		if latestBackup is not "" then
+			log "✅ findLatestBackup test passed: " & latestBackup
+			
+			-- 3. Test extractContentFromBackup
+			set extractedContent to extractContentFromBackup(latestBackup)
+			if extractedContent is equal to testContent then
+				log "✅ extractContentFromBackup test passed"
+			else
+				log "❌ extractContentFromBackup test failed: Content mismatch"
+				log "Expected: " & testContent
+				log "Got: " & extractedContent
+			end if
+		else
+			log "❌ findLatestBackup test failed: No backup found"
+		end if
+		
+		-- 4. Test listBackupEntities
+		set entities to listBackupEntities("test")
+		if (count of entities) > 0 then
+			log "✅ listBackupEntities test passed: Found " & (count of entities) & " entities"
+		else
+			log "❌ listBackupEntities test failed: No entities found"
+		end if
+		
+		-- 5. Test listBackupVersions
+		set versions to listBackupVersions(testEntity, "test")
+		if (count of versions) > 0 then
+			log "✅ listBackupVersions test passed: Found " & (count of versions) & " versions"
+		else
+			log "❌ listBackupVersions test failed: No versions found"
+		end if
+		
+		-- 6. Test manageBackupRetention
+		-- Create a few more backups first to have something to clean up
+		repeat with i from 1 to 3
+			set extraContent to "Extra backup content #" & i
+			createVersionedBackup(testEntity, extraContent, "test")
+			delay 1 -- Add a small delay to ensure different timestamps
+		end repeat
+		
+		-- Now clean up, keeping only 2 newest
+		set retentionResult to manageBackupRetention(testEntity, "test", 2)
+		if retentionResult's success then
+			log "✅ manageBackupRetention test passed: " & retentionResult's reason
+		else
+			log "❌ manageBackupRetention test failed: " & retentionResult's reason
+		end if
+	else
+		log "❌ createVersionedBackup test failed: " & backupResult's errorMessage
+	end if
+	
+	log "Utilities module tests completed."
+	return "Utilities module with enhanced backup functions tested successfully."
+end run
+
+------------------------------------------------------------
+--  logSelfTest()  • quick sanity check for the logger
+--  Emits INFO → ERROR (triggers escalation) → DEBUG
+------------------------------------------------------------
+on logSelfTest()
+	set originalLevel to logLevel
+	
+	my directFileLog("SelfTest", "INFO line – should always appear", LOG_LEVEL_INFO)
+	my directFileLog("SelfTest", "ERROR line – escalates to DEBUG", LOG_LEVEL_ERROR)
+	my directFileLog("SelfTest", "DEBUG line – visible only if escalation worked", LOG_LEVEL_DEBUG)
+	
+	-- restore
+	my setLogLevel(originalLevel)
+end logSelfTest
+
+on _format(theModule, theMessage, theLevel)
+	set {emoji, label} to {"ℹ️", "INFO"}
+	if theLevel = LOG_LEVEL_ERROR then set {emoji, label} to {"🔴", "ERROR"}
+	if theLevel = LOG_LEVEL_DEBUG then set {emoji, label} to {"🔍", "DEBUG"}
+	set ts to do shell script "date '+%Y-%m-%d %H:%M:%S'"
+	return ts & space & emoji & space & "[" & theModule & "] " & label & ": " & theMessage
+end _format
+
+
+

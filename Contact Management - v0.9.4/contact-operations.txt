@@ -1,0 +1,2692 @@
+-- ==========================================================
+-- MODULE: ContactOperations
+--  VERSION: 0.9.6-alpha (2025-06-04)
+-- ==========================================================
+-- Copyright: ©Philippe Dewost 2025
+--  PURPOSE:
+--      * Note/field deduplication, stats/exports, block logic, and pipeline cleaning core for CCC Contact Cleaner.
+--
+-- ==========================================================
+--  CHANGELOG
+-- ==========================================================
+-- 0.9.6-alpha  (2025-06-04)
+--	• Cleaned deprecated helpers, v1 pipeline functions, and unused v2 handlers
+--	• Removed dead code: vCard backup/restore chain, unused text processing functions
+--	• Stabilized V2 pipeline as the single processing path
+--	• Updated run() handler to test actual V2 pipeline components
+-- 0.9.5-alpha4 (2025-06-04):
+--	• Ended long fight to detect and halve long duplicated paragraphs ending with ...see more
+--	• Stabilized pipeline and handlers
+--
+-- ==========================================================
+--  FEATURE REQUESTS / NEXT STEPS
+-- ==========================================================
+--	• Simplify menu/UX to flat, list-based selection (no nested dialog traps)
+--	• Implement fuzzy block deduplication for edge cases
+--	• Add batch reporting with user pause every N contacts
+--	• Enhance CCC footer generation with better metrics and stats
+--	• Complete group tag management system (extract tags from notes, sync with groups)
+--	• Implement flat, user-friendly menu/UX (list style, avoid nesting)
+--	• Add Groups as Finder tags in exported vCards
+--	• Automatic security tagging based on note contents
+--	• Finish CLI automation entry-point parity with UX flow
+--
+-- ==========================================================
+-- KNOWN ISSUES
+-- ==========================================================
+-- * Some rare non-consecutive or fuzzy duplicates may still escape collapse
+-- * Deduplication can be expensive for huge notes (consider timeouts or limits)
+-- * Block deduplication warning in logs (processing continues normally)
+-- * Some character count metrics could be made more robust
+--
+-- ==========================================================
+-- CORE HANDLERS & STATUS
+-- ==========================================================
+-- processContactsWithScope() - Main batch processing entry point [ROBUST]
+-- processContactNoteV2() - V2 pipeline entry point [ROBUST]
+-- processContactNoteBase() - Unified contact processing with V2 path [ROBUST]
+-- processNoteContentV2() - Core V2 processing pipeline [ROBUST]
+-- normalizeContactLineV2() - Per-line LinkedIn/junk cleanup [ROBUST]
+-- deduplicateConsecutiveLineBlocksV2() - Multi-line block deduplication [ROBUST]
+-- deduplicateFlattenedSeeMoreBlocksV2() - "See more" glued block removal [ROBUST]
+-- deduplicateConsecutiveLinesV2() - Single line deduplication [ROBUST]
+-- trimLeadingTrailingBlankLines() - Text cleanup [ROBUST]
+-- 
+-- === SUPPORT FUNCTIONS ===
+-- updateCCCFooter() - Footer generation and management [ROBUST]
+-- extractExistingFooter() - Footer detection and parsing [ROBUST]
+-- backupContactNoteWithType() - Note backup with versioning [ROBUST]
+-- generateProcessingReport() - Batch processing reports [ROBUST]
+-- getCumulativeStatsReport() - Statistics reporting [ROBUST]
+--
+-- === STATISTICS & REPORTING ===
+-- loadCumulativeStats() - Statistics persistence [ROBUST]
+-- saveCumulativeStats() - Statistics storage [ROBUST]
+-- rebuildCumulativeStats() - Full statistics rebuild [ROBUST]
+-- updateCumulativeStats() - Incremental stats updates [ROBUST]
+
+use AppleScript version "2.4"
+use framework "Foundation"
+use scripting additions
+
+-- ==========================================================
+-- SCRIPT CONFIGURATION
+-- ==========================================================
+
+-- Version properties
+property scriptVersion : "0.9.6" -- Module's internal version (for development tracking)
+
+property scriptFolder : ""
+property backupFolder : ""
+property logsFolder : ""
+property reportsFolder : ""
+property sessionFolder : ""
+
+-- REFACTORING
+-- Flag to control which pipeline is used - initially set to false for testing
+property useNewPipeline : false
+
+-- Reference to utilities module
+property utilitiesScript : missing value
+
+-- Global variables for statistics
+global totalEdits, contactsProcessed, contactsModified, totalOriginalLength
+global debugMode, testMode, startTime
+
+-- What skip/force mode we start with on each session (immutable default)
+property defaultForceCleanupMode : "No, skip processed notes"
+
+-- Live flag, set by the UI via setForceCleanupMode()
+property forceCleanup : defaultForceCleanupMode
+
+property dupBlockCount : 0
+property dupLinesTotal : 0
+
+-- ==========================================================
+-- INITIALIZATION
+-- ==========================================================
+
+on initializeModule()
+	-- Set module identifiers first thing
+	global MODULE_NAME
+	set MODULE_NAME to "ContactOperations"
+	
+	-- Must use direct console logging during early initialization
+	-- (utilities may not be loaded yet)
+	log "Initializing " & MODULE_NAME & " module (v" & scriptVersion & ")"
+	
+	-- Initialize all processing variables first
+	try
+		initializeContactProcessing()
+	on error initErr
+		log "ERROR initializing ContactOperations processing variables: " & initErr
+	end try
+	
+	-- Initialize other module-specific variables
+	try
+		set forceCleanup to defaultForceCleanupMode
+	on error varErr
+		log "ERROR initializing ContactOperations variables: " & varErr
+	end try
+	
+	-- Initialize deprecation warning tracking
+	global deprecationWarningShown
+	set deprecationWarningShown to false
+	
+	-- Attempt to log through utilities if available, but don't fail if it's not
+	try
+		if utilitiesScript is not missing value then
+			-- Log through Utilities with proper module name
+			utilitiesScript's moduleLogInfo("ContactOperations", "Module initialized successfully")
+		else
+			-- Fallback to direct console logging
+			log "ContactOperations module initialized successfully"
+		end if
+	on error logErr
+		-- Ensure we have console logging as absolute fallback
+		log "ContactOperations module initialized with logging error: " & logErr
+	end try
+	
+	return true
+end initializeModule
+
+-- PURPOSE: Initialize all required processing variables with validation and error tracking
+on initializeContactProcessing()
+	-- Track initialization status for logging
+	set initSuccess to true
+	
+	try
+		-- Direct initialization of ALL required counters and flags
+		global totalEdits, contactsProcessed, contactsModified, errorCount
+		global inlineDuplicatesCount, lineDuplicatesCount, blockDuplicatesCount
+		global profilesModified, profilesCharsRemoved
+		global startTime, changeCount, checkCount, duplicatesRemoved
+		global inlineCharsRemoved, lineCharsRemoved, blockCharsRemoved, charsRemovedLine
+		global debugMode, testMode, processedContactsList
+		global totalOriginalLength
+		
+		-- Set explicit initial values
+		set totalEdits to 0
+		set contactsProcessed to 0
+		set contactsModified to 0
+		set errorCount to 0
+		set inlineDuplicatesCount to 0
+		set lineDuplicatesCount to 0
+		set blockDuplicatesCount to 0
+		set profilesModified to 0
+		set totalOriginalLength to 0
+		
+		-- ── Tag-only counters (for issue-flag summary) ──
+		global tagOnlyCounts, tagLinkedIn, tagDupLinkedIn, tagDupURL, tagMultiProfile
+		set tagOnlyCounts to 0
+		set tagLinkedIn to 0
+		set tagDupLinkedIn to 0
+		set tagDupURL to 0
+		set tagMultiProfile to 0
+		set profilesCharsRemoved to 0
+		set changeCount to 0
+		set checkCount to 0
+		set duplicatesRemoved to 0
+		set inlineCharsRemoved to 0
+		set lineCharsRemoved to 0
+		set blockCharsRemoved to 0
+		set charsRemovedLine to 0
+		set kbValueText to ""
+		set percentText to ""
+		
+		utilitiesScript's moduleLogDebug("ContactOperations", "Initialized all processing counters to zero")
+		
+		set processedContactsList to {}
+		utilitiesScript's moduleLogDebug("ContactOperations", "Initialized processedContactsList as empty array")
+		
+		-- Initialize other values if missing
+		if debugMode is missing value then
+			set debugMode to false
+			utilitiesScript's moduleLogDebug("ContactOperations", "Initialized debugMode to default (false)")
+		end if
+		
+		if testMode is missing value then
+			set testMode to false
+			utilitiesScript's moduleLogDebug("ContactOperations", "Initialized testMode to default (false)")
+		end if
+		
+		-- Set start time for timing calculations
+		set startTime to current date
+		utilitiesScript's moduleLogDebug("ContactOperations", "Set processing start time: " & (startTime as string))
+		
+	on error initErr
+		set initSuccess to false
+		
+		-- Try to use moduleLogError, but fall back to direct logging if not available yet
+		try
+			utilitiesScript's moduleLogError("ContactOperations", "Error initializing processing variables: " & initErr)
+		on error
+			log "ContactOperations: Error initializing processing variables: " & initErr
+		end try
+	end try
+	
+	-- Log successful initialization with module context
+	if initSuccess then
+		utilitiesScript's moduleLogInfo("ContactOperations", "Initialized all processing variables successfully")
+	end if
+	
+	-- Validation check of critical variables
+	try
+		-- Verify most critical variables were set properly
+		if processedContactsList is missing value then
+			utilitiesScript's moduleLogWarning("ContactOperations", "processedContactsList is still missing value after initialization")
+			set processedContactsList to {}
+		end if
+		
+		if startTime is missing value then
+			utilitiesScript's moduleLogWarning("ContactOperations", "startTime is missing value after initialization")
+			set startTime to current date
+		end if
+	on error validateErr
+		-- This shouldn't happen, but just in case
+		try
+			utilitiesScript's moduleLogError("ContactOperations", "Error validating initialization: " & validateErr)
+		on error
+			log "ContactOperations: Error validating initialization: " & validateErr
+		end try
+	end try
+	
+	return true
+end initializeContactProcessing
+
+-- PURPOSE: Establish connection to Utilities module with proper error handling
+on setUtilitiesReference(theUtilitiesScript)
+	-- Store the reference with defensive check
+	try
+		set utilitiesScript to theUtilitiesScript
+		
+		-- Log the successful connection using the new logging pattern if available
+		if utilitiesScript is not missing value then
+			try
+				utilitiesScript's moduleLogInfo("ContactOperations", "Utilities reference set successfully")
+			on error utilErr
+				log "[ContactOperations] Logging error while setting utilities reference: " & utilErr
+			end try
+		else
+			-- Fall back to console logging when utilities unavailable
+			log "ContactOperations: Utilities reference was provided but is missing value"
+		end if
+	on error refErr
+		-- Log error to console if we can't even set the reference
+		log "[ContactOperations] Error setting Utilities reference: " & refErr
+	end try
+	
+	return true
+end setUtilitiesReference
+
+-- PURPOSE: Securely store session folder paths with validation and error handling
+on setSessionPaths(newSessionFolder, newBackupFolder, newLogsFolder, newReportsFolder)
+	-- Store folder paths globally
+	global sessionFolder, backupFolder, logsFolder, reportsFolder
+	
+	-- Validate input paths with proper logging
+	if newSessionFolder is "" or newSessionFolder is missing value then
+		utilitiesScript's moduleLogError("ContactOperations", "Received empty session folder path")
+	else
+		utilitiesScript's moduleLogDebug("ContactOperations", "Received session folder: " & newSessionFolder)
+	end if
+	
+	if newLogsFolder is "" or newLogsFolder is missing value then
+		utilitiesScript's moduleLogError("ContactOperations", "Received empty logs folder path")
+	else
+		utilitiesScript's moduleLogDebug("ContactOperations", "Received logs folder: " & newLogsFolder)
+	end if
+	
+	if newBackupFolder is "" or newBackupFolder is missing value then
+		utilitiesScript's moduleLogWarning("ContactOperations", "Received empty backup folder path")
+	else
+		utilitiesScript's moduleLogDebug("ContactOperations", "Received backup folder: " & newBackupFolder)
+	end if
+	
+	if newReportsFolder is "" or newReportsFolder is missing value then
+		utilitiesScript's moduleLogWarning("ContactOperations", "Received empty reports folder path")
+	else
+		utilitiesScript's moduleLogDebug("ContactOperations", "Received reports folder: " & newReportsFolder)
+	end if
+	
+	-- Update the paths with validation (even if empty, to maintain expected behavior)
+	set sessionFolder to newSessionFolder
+	set backupFolder to newBackupFolder
+	set logsFolder to newLogsFolder
+	set reportsFolder to newReportsFolder
+	
+	-- Log the paths
+	utilitiesScript's moduleLogInfo("ContactOperations", "Session paths updated in ContactOperations:")
+	utilitiesScript's moduleLogInfo("ContactOperations", "  Session: " & sessionFolder)
+	utilitiesScript's moduleLogInfo("ContactOperations", "  Backups: " & backupFolder)
+	utilitiesScript's moduleLogInfo("ContactOperations", "  Logs: " & logsFolder)
+	utilitiesScript's moduleLogInfo("ContactOperations", "  Reports: " & reportsFolder)
+	
+	-- Verify that folders exist with proper error handling
+	try
+		if sessionFolder is not "" then
+			tell application "System Events"
+				if not (exists folder sessionFolder) then
+					utilitiesScript's moduleLogWarning("ContactOperations", "Session folder does not exist: " & sessionFolder)
+				end if
+			end tell
+		end if
+		
+		if logsFolder is not "" then
+			tell application "System Events"
+				if not (exists folder logsFolder) then
+					utilitiesScript's moduleLogWarning("ContactOperations", "Logs folder does not exist: " & logsFolder)
+				end if
+			end tell
+		end if
+	on error verifyErr
+		utilitiesScript's moduleLogError("ContactOperations", "Error verifying folder existence: " & verifyErr)
+	end try
+	
+	return true
+end setSessionPaths
+
+-- ==========================================================
+-- LOGGING SYSTEM ACCESS
+--  Logging wrappers                          --
+-------------------------------------------------------------------------------
+(*
+    These lightweight handlers are the *only* logging entry points used
+    inside ContactOperations.  They now rely on Utilities.safeLog instead of
+    directFileLog, and therefore do not need to request the per‑module
+    log‑level table anymore.
+
+    kLogLevelDebug / Info / Error are defined once at the top of the script
+    for clarity.  Adjust the numeric values only in Utilities if the levels
+    ever change – the façade isolates us from such edits.
+*)
+
+property kLogLevelError : 0
+property kLogLevelInfo : 1
+property kLogLevelDebug : 2
+
+on moduleLogError(aMsg)
+	if utilitiesScript is missing value then
+		log "[ContactOperations] ERROR: " & aMsg
+	else
+		utilitiesScript's safeLog("ContactOperations", aMsg, kLogLevelError)
+	end if
+end moduleLogError
+
+on moduleLogInfo(aMsg)
+	if utilitiesScript is missing value then
+		log "[ContactOperations] INFO: " & aMsg
+	else
+		utilitiesScript's safeLog("ContactOperations", aMsg, kLogLevelInfo)
+	end if
+end moduleLogInfo
+
+on moduleLogDebug(aMsg)
+	if utilitiesScript is missing value then
+		log "[ContactOperations] DEBUG: " & aMsg
+	else
+		utilitiesScript's safeLog("ContactOperations", aMsg, kLogLevelDebug)
+	end if
+end moduleLogDebug
+
+-------------------------------------------------------------------------------
+--  moduleLogWarning(message)  • INFO‑level warning with emoji prefix
+-------------------------------------------------------------------------------
+on moduleLogWarning(message)
+	try
+		if utilitiesScript is not missing value then
+			-- Use INFO level (1) but prefix with ⚠️ for visibility
+			utilitiesScript's safeLog("ContactOperations", "⚠️ WARNING: " & message, 1)
+		else
+			log "[ContactOperations] WARNING: " & message
+		end if
+		return true
+	on error utilErr
+		log "[ContactOperations] WARNING: " & message & " (Logging error: " & utilErr & ")"
+		return false
+	end try
+end moduleLogWarning
+
+
+-------------------------------------------------------------------------------
+--  setDebugMode(newDebugMode)  • keep local flag & delegate to Utilities
+-------------------------------------------------------------------------------
+on setDebugMode(newDebugMode)
+	-- Shared flag for this module
+	global debugMode
+	set debugMode to newDebugMode
+	
+	-- Delegate to the authoritative implementation in Utilities
+	utilitiesScript's setDebugMode(newDebugMode)
+	
+	return true
+end setDebugMode
+
+-- Simplified log level setting delegated to utilitiesScript's
+on setLogLevel(newLevel)
+	if utilitiesScript is not missing value then ¬
+		utilitiesScript's setLogLevel(newLevel)
+	set logLevel to newLevel -- local shadow, just in case
+	moduleLogInfo("Log level set to " & newLevel)
+end setLogLevel
+
+
+-- ==========================================================
+-- BATCH CONTACT PROCESSING
+-- ==========================================================
+
+-- ===================================================
+-- Handler: processContactNoteV2
+-- VERSION: 0.9.0-alpha4 (2025-05-20)
+-- PURPOSE: Process a contact note using the enhanced V2 pipeline.
+--          Wrapper that calls the base function with V2 setting.
+-- INPUTS:  aPerson (Contacts record), testMode (boolean)
+-- RETURNS: {success:boolean, modified:boolean, reason:text, charsRemoved:integer}
+-- ===================================================
+on processContactNoteV2(aPerson, testMode)
+	return processContactNoteBase(aPerson, testMode, "v2")
+end processContactNoteV2
+
+-- ==========================================================
+-- REFACTORING SECTION (runs in //)
+-- ==========================================================
+
+-- ===================================================
+-- Handler: processContactNoteBase
+-- VERSION: 0.9.0-alpha4 (2025-05-20)
+-- PURPOSE: Unified base function that handles all common functionality for
+--          contact note processing with version-specific processing delegation.
+-- INPUTS:  aPerson (Contacts record) - The contact to process
+--          testMode (boolean) - Whether to run in simulation mode
+--          versionToUse (text) - "v1" or "v2" to select processing pipeline (DEPRECATED)
+-- RETURNS: {success:boolean, modified:boolean, reason:text, charsRemoved:integer}
+-- ===================================================
+on processContactNoteBase(aPerson, testMode, versionToUse)
+	-- Access global counters for statistics
+	global debugMode, inlineDuplicatesCount, blockDuplicatesCount, lineDuplicatesCount
+	global inlineCharsRemoved, lineCharsRemoved, blockCharsRemoved, totalOriginalLength
+	
+	-- 0. PRE-FLIGHT CHECKS
+	set contactName to "<Unknown>"
+	try
+		tell application "Contacts" to set contactName to name of aPerson
+	end try
+	if aPerson is missing value then
+		return {success:false, modified:false, reason:"Missing contact reference", charsRemoved:0}
+	end if
+	
+	-- Initialize any missing counters for safety
+	if inlineDuplicatesCount is missing value then set inlineDuplicatesCount to 0
+	if lineDuplicatesCount is missing value then set lineDuplicatesCount to 0
+	if blockDuplicatesCount is missing value then set blockDuplicatesCount to 0
+	if inlineCharsRemoved is missing value then set inlineCharsRemoved to 0
+	if lineCharsRemoved is missing value then set lineCharsRemoved to 0
+	if blockCharsRemoved is missing value then set blockCharsRemoved to 0
+	if totalOriginalLength is missing value then set totalOriginalLength to 0
+	
+	-- Log entry to function - key operations stay at INFO level
+	utilitiesScript's moduleLogInfo("ContactOperations", "Starting processContactNote (" & versionToUse & ") for: " & contactName)
+	
+	-- 1. ENHANCED NOTE RETRIEVAL
+	set originalNote to ""
+	try
+		-- Replicate the exact same robust retrieval strategies from original code
+		tell application "Contacts"
+			-- Strategy 1: Direct property access
+			set originalNote to note of aPerson
+			utilitiesScript's moduleLogDebug("ContactOperations", "Strategy 1 note length: " & (length of originalNote))
+			
+			if originalNote is missing value then set originalNote to ""
+			
+			-- Check if suspiciously short (might be just footer)
+			if (length of originalNote) < 200 and originalNote contains "CCC Summary" then
+				utilitiesScript's moduleLogInfo("ContactOperations", "Note appears truncated - trying vCard method")
+				
+				-- Strategy 2: Force a refresh via vCard
+				set vcardData to vcard of aPerson
+				delay 0.2 -- Give Contacts time to refresh
+				
+				-- Try retrieving the note again
+				set tempNote to note of aPerson
+				if tempNote is not missing value and (length of tempNote) > (length of originalNote) then
+					set originalNote to tempNote
+					utilitiesScript's moduleLogInfo("ContactOperations", "vCard method yielded longer note: " & (length of originalNote))
+				end if
+				
+				-- If still suspiciously short, try one more approach
+				if (length of originalNote) < 200 and originalNote contains "CCC Summary" then
+					utilitiesScript's moduleLogInfo("ContactOperations", "Still appears truncated - try direct edit/get cycle")
+					
+					-- Strategy 3: Force update cycle
+					-- First, grab the current content
+					set currentContent to originalNote
+					
+					-- Make a tiny modification and save (forces refresh)
+					set note of aPerson to currentContent & " "
+					delay 0.2
+					
+					-- Then remove the modification and get again
+					set note of aPerson to currentContent
+					delay 0.2
+					
+					-- Retrieve fresh content
+					set refreshedNote to note of aPerson
+					if refreshedNote is not missing value and (length of refreshedNote) > (length of originalNote) then
+						set originalNote to refreshedNote
+						utilitiesScript's moduleLogInfo("ContactOperations", "Edit/get cycle yielded longer note: " & (length of originalNote))
+					end if
+				end if
+				
+				-- FINAL VERIFICATION
+				if (length of originalNote) < 200 and originalNote contains "CCC Summary" then
+					utilitiesScript's moduleLogInfo("ContactOperations", "Cannot retrieve complete note even after multiple attempts")
+					return {success:false, modified:false, reason:"Could not retrieve complete note", charsRemoved:0}
+				end if
+			end if
+		end tell
+	end try
+	if originalNote is missing value then set originalNote to ""
+	
+	-- Convert to text for consistent handling
+	set originalNote to originalNote as text
+	
+	-- IMPORTANT: Check if this note already has a footer
+	set hasFooter to my hasCCCFooter(originalNote)
+	
+	-- Update total original length counter
+	set totalOriginalLength to totalOriginalLength + (length of originalNote)
+	utilitiesScript's moduleLogDebug("ContactOperations", "Added " & (length of originalNote) & " to totalOriginalLength")
+	
+	-- 2. BACKUP ORIGINAL NOTE
+	if (not testMode or debugMode) then
+		try
+			backupContactNoteWithType(aPerson, contactName, originalNote, "note")
+			utilitiesScript's moduleLogDebug("ContactOperations", "Retrieved and backed-up original note of length: " & (length of originalNote))
+		on error backupErr
+			utilitiesScript's moduleLogWarning("ContactOperations", "Backup error for " & contactName & ": " & backupErr)
+		end try
+	else
+		utilitiesScript's moduleLogDebug("ContactOperations", "Retrieved note of length: " & (length of originalNote))
+	end if
+	
+	-- 3. EXTRACT EXISTING FOOTER
+	set footerBlock to extractExistingFooter(originalNote)
+	if footerBlock ≠ "" then
+		set cleanedText to text 1 thru ((offset of footerBlock in originalNote) - 1) of originalNote
+	else
+		set cleanedText to originalNote
+	end if
+	utilitiesScript's moduleLogDebug("ContactOperations", "Extracted footer? " & (footerBlock ≠ ""))
+	
+	-- 4. PROCESSING CHAIN Track original length for comparison
+	set originalLength to length of cleanedText
+	
+	set finalText to my processNoteContentV2(cleanedText)
+	utilitiesScript's moduleLogInfo("ContactOperations", "V2 processing completed, result length: " & (length of finalText) & " characters")
+	
+	-- 5. DEBUG MODE PROCESSED NOTE BACKUP
+	if (debugMode) then
+		try
+			-- Guarantee processed note is text (not list)
+			set safeProcessedNote to finalText
+			if (class of safeProcessedNote) is list then
+				set safeProcessedNote to utilitiesScript's joinText(safeProcessedNote, return & return)
+			end if
+			backupContactNoteWithType(aPerson, contactName, safeProcessedNote, "processed-" & versionToUse)
+			utilitiesScript's moduleLogDebug("ContactOperations", "Backed up processed note of length: " & (length of safeProcessedNote))
+		on error backupErr
+			utilitiesScript's moduleLogWarning("ContactOperations", "Processed backup error for " & contactName & ": " & backupErr)
+		end try
+	end if
+	
+	-- 6. MODIFICATION DETECTION
+	-- Calculate total characters removed
+	set charsRemoved to (length of cleanedText) - (length of finalText)
+	if charsRemoved < 0 then set charsRemoved to 0
+	
+	set contentModified to (charsRemoved > 0)
+	set modificationReason to "Content simplified and optimized: " & charsRemoved & " characters removed"
+	
+	-- 7. FOOTER BUILDING
+	utilitiesScript's moduleLogDebug("ContactOperations", "Building CCC footer for " & contactName & " (" & charsRemoved & " chars removed)")
+	set finalNoteWithFooter to updateCCCFooter(finalText, charsRemoved, originalLength, contentModified)
+	
+	-- 8. APPLY AND SAVE - keep this one as INFO level for visibility
+	if contentModified and not testMode then
+		tell application "Contacts"
+			set note of aPerson to finalNoteWithFooter
+			delay 0.1
+			save
+		end tell
+		utilitiesScript's moduleLogInfo("ContactOperations", "Note updated for " & contactName)
+	else
+		utilitiesScript's moduleLogInfo("ContactOperations", "SIMULATION → «" & contactName & "» would be updated (" & charsRemoved & " chars)")
+	end if
+	
+	-- 9. RETURN STATS
+	return {success:true, modified:contentModified, reason:modificationReason, charsRemoved:charsRemoved}
+end processContactNoteBase
+
+-------------------------------------------------------------------------------
+-- Handler: processNoteContentV2 [Optimized]
+-- VERSION: 1.0.0-alpha (2025-05-23)
+-- PURPOSE:
+--   Fastest-possible, robust v2 pipeline for contact note cleaning:
+--     1. Per-line normalization (all atomic LinkedIn/junk stripping)
+--     2. Deduplicate consecutive line blocks (2–4 lines)
+--     3. Deduplicate all consecutive single lines (classic)
+--     4. Remove extra blank lines, leading/trailing blanks
+--     5. [Optional: block dedup, see more... etc]
+-- OUTPUT: outputText (text)
+-------------------------------------------------------------------------------
+on processNoteContentV2(cleanedText)
+	global utilitiesScript
+	
+	-- 1. Per-line normalization
+	set linesList to paragraphs of utilitiesScript's forceText(cleanedText)
+	set normLines to {}
+	repeat with ln in linesList
+		set normLine to my normalizeContactLineV2(ln)
+		if normLine ≠ "" then set end of normLines to normLine
+	end repeat
+	set textA to utilitiesScript's joinText(normLines, return)
+	
+	-- 2. Deduplicate consecutive multi-line blocks (2–4 lines)
+	set textB to deduplicateConsecutiveLineBlocksV2(textA)
+	
+	-- 3. Remove flattened "see more" garbage blocks
+	-- set textC to LEGACYdeduplicateFlattenedSeeMoreBlocksV2(textB)
+	set textC to deduplicateFlattenedSeeMoreBlocksV2(textB)
+	
+	-- 4. Deduplicate all consecutive single lines
+	set textD to deduplicateConsecutiveLinesV2(textC)
+	
+	-- 5. Collapse multiple blank lines and trim leading/trailing blanks
+	set textE to utilitiesScript's collapseMultipleBlankLines(textD)
+	set outputText to trimLeadingTrailingBlankLines(textE)
+	
+	return outputText
+end processNoteContentV2
+
+-------------------------------------------------------------------------------
+-- Handler: normalizeContactLineV2
+-- VERSION: 0.9.1-pipeline-critical (2025-05-28)
+-- PIPELINE CRITICAL: DO NOT REMOVE, OPTIMIZE AWAY, OR ALTER STRUCTURAL LOGIC
+--
+-- PURPOSE:
+--   • Cleans LinkedIn junk, headers, prefixes.
+--   • Ensures robust block separation for glue/block deduplication by:
+--       - Replacing all lines ending with " logo" (case-insensitive) with a blank line + return.
+--       - Collapsing ExperienceExperience/EducationEducation to "==== Experience"/"==== Education" with return.
+--   • All other pipeline logic as before (FirstHalfFirstHalf, fuzzy date, etc.).
+--   • Maintains all error handling and LinkedIn-specific cleanups.
+--   • DO NOT "optimize" this away: downstream logic depends on these structural markers!
+-------------------------------------------------------------------------------
+on normalizeContactLineV2(lineText)
+	global utilitiesScript
+	set handlerName to "normalizeContactLineV2"
+	
+	try
+		set cleanedLine to utilitiesScript's trimWhitespace(lineText)
+	on error trimErr number trimNum
+		utilitiesScript's moduleLogDebug("ContactOperations", "ERROR: " & trimErr & " (number: " & trimNum & ")")
+	end try
+	
+	if cleanedLine is missing value or cleanedLine = "" then return ""
+	
+	-- LinkedIn/section/field garbage handling
+	if (cleanedLine ends with " logo") or (cleanedLine ends with "logo") then return linefeed
+	if ((cleanedLine contains "Show all ") and (cleanedLine contains " experience")) then return ""
+	if (cleanedLine contains "degree connection") then return ""
+	if cleanedLine starts with "Contact Info" then return linefeed & "==== " & cleanedLine
+	if cleanedLine starts with "ExperienceExperience" then return linefeed & linefeed & "==== Experience"
+	if cleanedLine starts with "EducationEducation" then return linefeed & linefeed & "==== Education"
+	set prefixes to {"Location", "Degree Name", "Field Of Study", "Dates Employed", "Employment Duration", "Total Duration"}
+	repeat with p in prefixes
+		if cleanedLine starts with p then
+			set cleanedLine to text ((length of p) + 2) thru -1 of cleanedLine
+		end if
+	end repeat
+	if cleanedLine is "LinkedIn" then return linefeed & linefeed & "____________ " & linefeed & "LinkedIn"
+	if cleanedLine starts with "-- LinkedIn" then return linefeed & linefeed & "____________ " & linefeed & cleanedLine
+	
+	set origLine to cleanedLine
+	set wasDeduped to false
+	
+	-- === Generic FirstHalfFirstHalf (via Utilities) ===
+	set dedupedLine to utilitiesScript's deduplicateFirstHalfRepeat(cleanedLine)
+	if dedupedLine ≠ cleanedLine then
+		set cleanedLine to dedupedLine
+		set wasDeduped to true
+	end if
+	
+	-- Take care of 'Nov 2019 - Present · 5 yrs 5 mosNov 2019 to Present · 5 yrs 5 mos'
+	if (cleanedLine contains " - ") and (cleanedLine contains " to ") then
+		set normLine to utilitiesScript's replaceText(cleanedLine, " to ", " - ")
+		set dedupedLine to utilitiesScript's deduplicateFirstHalfRepeat(normLine)
+		if dedupedLine ≠ normLine then
+			set cleanedLine to dedupedLine
+		end if
+		-- If dedupe didn't change anything, cleanedLine remains as original (do nothing)
+	end if
+	
+	-- Never emit a lone "to"
+	if cleanedLine is "to" then return ""
+	return cleanedLine
+end normalizeContactLineV2
+
+-------------------------------------------------------------------------------
+-- Handler: deduplicateFlattenedSeeMoreBlocksV2 (LEGACY, works 90%)
+-- VERSION: 1.5.0-alpha (2025-05-24) -- Always checks for glue; logs every candidate!
+-- PURPOSE:
+--   Checks *every* long, "see more"-ending line for glued repeat,
+--   compares with previous block (no blank line required),
+--   logs block, candidate, and result for every match attempt.
+-- CAVEATS : The line length was adjusted from 200 to 150 to catch smaller paragraphs
+-------------------------------------------------------------------------------
+on LEGACYdeduplicateFlattenedSeeMoreBlocksV2(inputText)
+	global utilitiesScript
+	set handlerName to "LEGACYdeduplicateFlattenedSeeMoreBlocksV2"
+	set linesList to paragraphs of utilitiesScript's forceText(inputText)
+	set n to count of linesList
+	set outLines to {}
+	set blockBuffer to {}
+	
+	repeat with i from 1 to n
+		set thisLine to linesList's item i
+		set thisLineTrim to utilitiesScript's trimWhitespace(thisLine)
+		
+		-- Always accumulate the block (to compare with glue if needed)
+		set end of blockBuffer to thisLine
+		
+		-- If this is a long, "see more"-ending line, and not the first line of blockBuffer
+		-- The line length may be adjusted depending on the size of the paragraphs.
+		if ((length of thisLine) > 150) and ((thisLine ends with "…see more") or (thisLine ends with "...see more")) and ((count of blockBuffer) > 1) then
+			-- Compare candidate to previous block (everything before this line)
+			set blockLines to items 1 thru ((count of blockBuffer) - 1) of blockBuffer
+			set blockText to utilitiesScript's joinText(blockLines, "")
+			set blockTextFlat to utilitiesScript's replaceText(return, "", blockText)
+			set blockTextFlat to utilitiesScript's replaceText(" ", "", blockTextFlat)
+			set blockTextFlat to utilitiesScript's trimWhitespace(blockTextFlat)
+			
+			set candidateFlat to utilitiesScript's replaceText(" ", "", thisLine)
+			set candidateFlat to utilitiesScript's trimWhitespace(candidateFlat)
+			
+			utilitiesScript's moduleLogDebug(handlerName, "BLOCK [" & blockTextFlat & "]")
+			utilitiesScript's moduleLogDebug(handlerName, "CANDIDATE [" & candidateFlat & "]")
+			
+			set dedupedLine to utilitiesScript's deduplicateFirstHalfRepeat(candidateFlat)
+			if dedupedLine = blockTextFlat then
+				utilitiesScript's moduleLogDebug(handlerName, "REMOVED: Glued 'see more' block detected and skipped.")
+				-- Remove the candidate line (don't add to outLines)
+				-- Remove it from blockBuffer (don't output twice)
+				set blockBuffer to blockLines
+			else
+				utilitiesScript's moduleLogDebug(handlerName, "KEPT: Candidate was not an exact repeat.")
+			end if
+		end if
+		
+		-- On blank lines, flush blockBuffer to output and reset
+		if thisLineTrim = "" then
+			repeat with b in blockBuffer
+				set end of outLines to b
+			end repeat
+			set blockBuffer to {}
+		end if
+	end repeat
+	
+	-- At end, flush any remaining blockBuffer
+	if ((count of blockBuffer) > 0) then
+		repeat with b in blockBuffer
+			set end of outLines to b
+		end repeat
+	end if
+	
+	set cleanedText to utilitiesScript's joinText(outLines, return)
+	return cleanedText
+end LEGACYdeduplicateFlattenedSeeMoreBlocksV2
+
+-------------------------------------------------------------------------------
+-- Handler: deduplicateFlattenedSeeMoreBlocksV2
+-- VERSION: 7.1.0-canonical-experience-scan-debug (2025-06-05)
+-- AUTHOR: Philippe Dewost / ChatGPT
+-- PURPOSE:
+--   Canonically detects/removes LinkedIn duplicateSeeMore glue blocks
+--   - Searches for BlockStartString1 in the entire Experience block
+--   - After dedupe, prevents all double output/flush (fixes both known anomalies)
+--   - Section header/footers never duplicated
+--   - All debug and logic retained; pipeline remains safe
+-------------------------------------------------------------------------------
+
+on deduplicateFlattenedSeeMoreBlocksV2(inputText)
+	global utilitiesScript
+	set handlerName to "deduplicateFlattenedSeeMoreBlocksV2"
+	set linesList to paragraphs of (utilitiesScript's forceText(inputText))
+	set outLines to {}
+	set blockBuffer to {}
+	set n to count of linesList
+	set inExperienceSection to false
+	set experienceLines to {}
+	set alreadyFlushedExperience to false -- NEW: Track flush per section
+	
+	repeat with i from 1 to n
+		set didDedupe to false
+		set thisLine to item i of linesList
+		set trimmedLine to utilitiesScript's trimWhitespace(thisLine)
+		set end of blockBuffer to thisLine
+		
+		-- Section start: Experience boundary
+		if (trimmedLine starts with "==== Experience") then
+			set inExperienceSection to true
+			set experienceLines to {} -- Reset lines for section
+			set alreadyFlushedExperience to false
+			utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] Entered Experience section")
+		end if
+		if inExperienceSection then
+			set end of experienceLines to thisLine
+		end if
+		
+		-- STEP 1: Detect duplicateSeeMore candidate
+		if ((length of thisLine) > 100) and ((trimmedLine ends with "…see more") or (trimmedLine ends with "...see more")) then
+			set seeMoreMarker to "…see more"
+			set seeMorePos to offset of seeMoreMarker in thisLine
+			if seeMorePos = 0 then
+				set seeMoreMarker to "...see more"
+				set seeMorePos to offset of seeMoreMarker in thisLine
+			end if
+			if seeMorePos > 0 then
+				set candidateText to text 1 thru (seeMorePos - 1) of thisLine
+				set lenCandidate to length of candidateText
+				utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] candidateText length: " & lenCandidate)
+				
+				if lenCandidate ≥ 20 then
+					set blockEndString2 to text (lenCandidate - 19) thru lenCandidate of candidateText
+				else
+					set blockEndString2 to candidateText
+				end if
+				utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] BlockEndString2: [" & blockEndString2 & "]")
+				
+				set blockEndIdxList to {}
+				set searchPos to 1
+				repeat
+					set idx to offset of blockEndString2 in (text searchPos thru -1 of candidateText)
+					if idx = 0 then exit repeat
+					set idx to idx + searchPos - 1
+					set end of blockEndIdxList to idx
+					set searchPos to idx + 1
+					if searchPos > lenCandidate then exit repeat
+				end repeat
+				utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] blockEndIdxList: " & blockEndIdxList)
+				
+				if (count of blockEndIdxList) > 1 then
+					set blockEndIdx1 to item -2 of blockEndIdxList
+					set blockEndIdx2 to item -1 of blockEndIdxList
+					utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] BlockEndString1 idx: " & blockEndIdx1 & ", BlockEndString2 idx: " & blockEndIdx2)
+					
+					set blockStart2Start to blockEndIdx1 + (length of blockEndString2)
+					set blockStart2Len to 20
+					if (blockStart2Start + blockStart2Len - 1) > lenCandidate then
+						set blockStart2Len to lenCandidate - blockStart2Start + 1
+					end if
+					if blockStart2Start > lenCandidate or blockStart2Len < 1 then
+						set blockStartString2 to ""
+					else
+						set blockStartString2 to text blockStart2Start thru (blockStart2Start + blockStart2Len - 1) of candidateText
+					end if
+					utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] BlockStartString2: [" & blockStartString2 & "]")
+					
+					-- Find BlockStartString1 at a line start in full Experience
+					set blockStart1Pos to 0
+					set foundLineStart to false
+					if (blockStartString2 ≠ "") and ((count of experienceLines) > 0) then
+						set joinedExp to utilitiesScript's joinText(experienceLines, return)
+						set testPos to 1
+						repeat
+							set idx to offset of blockStartString2 in (text testPos thru -1 of joinedExp)
+							if idx = 0 then exit repeat
+							set idx to idx + testPos - 1
+							if idx = 1 then
+								set blockStart1Pos to idx
+								set foundLineStart to true
+								exit repeat
+							else if character (idx - 1) of joinedExp is return or character (idx - 1) of joinedExp is linefeed then
+								set blockStart1Pos to idx
+								set foundLineStart to true
+								exit repeat
+							end if
+							set testPos to idx + 1
+							if testPos > (length of joinedExp) then exit repeat
+						end repeat
+					end if
+					utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] BlockStartString1 found at line start in Experience: " & foundLineStart & ", pos: " & blockStart1Pos)
+					
+					set firstHalf to ""
+					set secondHalf to ""
+					if foundLineStart and blockStart1Pos > 0 then
+						set endIdxInExperience to offset of blockEndString2 in (text blockStart1Pos thru -1 of joinedExp)
+						if endIdxInExperience > 0 then
+							set endIdxInExperience to endIdxInExperience + blockStart1Pos - 1 + (length of blockEndString2) - 1
+							set firstHalf to text blockStart1Pos thru endIdxInExperience of joinedExp
+						end if
+						if (blockStart2Start > 0) and (blockEndIdx2 > 0) then
+							set secondHalf to text blockStart2Start thru (blockEndIdx2 + (length of blockEndString2) - 1) of candidateText
+						end if
+						utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] FirstHalf/SecondHalf lengths: " & (length of firstHalf) & "/" & (length of secondHalf))
+						
+						-- Flatten and compare
+						set flatFirst to utilitiesScript's replaceText(firstHalf, return, "")
+						set flatFirst to utilitiesScript's replaceText(flatFirst, linefeed, "")
+						set flatFirst to utilitiesScript's replaceText(flatFirst, tab, "")
+						set flatFirst to utilitiesScript's replaceText(flatFirst, " ", "")
+						set flatFirst to utilitiesScript's replaceText(flatFirst, (character id 160), "")
+						set flatFirst to utilitiesScript's trimWhitespace(flatFirst)
+						set flatSecond to utilitiesScript's replaceText(secondHalf, return, "")
+						set flatSecond to utilitiesScript's replaceText(flatSecond, linefeed, "")
+						set flatSecond to utilitiesScript's replaceText(flatSecond, tab, "")
+						set flatSecond to utilitiesScript's replaceText(flatSecond, " ", "")
+						set flatSecond to utilitiesScript's replaceText(flatSecond, (character id 160), "")
+						set flatSecond to utilitiesScript's trimWhitespace(flatSecond)
+						
+						utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] flatFirst: [" & flatFirst & "]")
+						utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] flatSecond: [" & flatSecond & "]")
+						
+						if (flatFirst = flatSecond) and ((length of flatFirst) > 40) then
+							utilitiesScript's moduleLogInfo(handlerName, "[line " & i & "] CANONICAL dedupe: duplicateSeeMore block removed.")
+							-- Output all lines in experienceLines up to blockStart1Pos - 1, then FirstHalf (as lines)
+							if alreadyFlushedExperience is false then
+								set preFirst to text 1 thru (blockStart1Pos - 1) of joinedExp
+								set preFirstLines to paragraphs of preFirst
+								repeat with pf in preFirstLines
+									set end of outLines to pf
+								end repeat
+								set alreadyFlushedExperience to true -- Output exactly once!
+							end if
+							set firstHalfLines to paragraphs of firstHalf
+							repeat with fh in firstHalfLines
+								set end of outLines to fh
+							end repeat
+							set blockBuffer to {}
+							set experienceLines to {}
+							set didDedupe to true
+						else
+							utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] Halves do NOT match; skip dedupe.")
+						end if
+					else
+						utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] BlockStartString1 not found at line start in Experience; skip dedupe.")
+					end if
+				else
+					utilitiesScript's moduleLogDebug(handlerName, "[line " & i & "] Not a duplicateSeeMore block (only one BlockEndString occurrence).")
+				end if
+			end if
+		end if
+		
+		-- Flow-control: After dedupe or Experience flush, do not output/flush buffers again!
+		if didDedupe is false and alreadyFlushedExperience is false then
+			if trimmedLine = "" then
+				repeat with b in blockBuffer
+					set end of outLines to b
+				end repeat
+				set blockBuffer to {}
+			end if
+		end if
+	end repeat
+	
+	-- Final flush, but never duplicate Experience output
+	if (count of blockBuffer) > 0 and alreadyFlushedExperience is false then
+		repeat with b in blockBuffer
+			set end of outLines to b
+		end repeat
+	end if
+	
+	return utilitiesScript's joinText(outLines, return)
+end deduplicateFlattenedSeeMoreBlocksV2
+
+
+-- ========================================================================================
+-- Handler   : deduplicateConsecutiveLineBlocksV2
+-- VERSION   : 1.2.0   (2025-06-04)
+-- PURPOSE   : Remove **immediate** repeats of 2- to 4-line blocks anywhere
+--             in the note, keeping the first copy and skipping the duplicate.
+--
+-- CHANGELOG ---------------------------------------------------------------
+-- 1.2.0  • Added counters dupBlockCount / dupLinesTotal.
+--        • Emits one INFO log summarising removals.
+--        • Zero logic changes vs the May-24 implementation.
+-- ========================================================================================
+
+on deduplicateConsecutiveLineBlocksV2(theText)
+	---- dependencies -------------------------------------------------------
+	global utilitiesScript
+	set handlerName to "deduplicateConsecutiveLineBlocksV2"
+	
+	---- state ----------------------------------------------------------------
+	set inLines to paragraphs of (utilitiesScript's forceText(theText))
+	set outLines to {}
+	
+	set dupBlockCount to 0
+	set dupLinesTotal to 0
+	
+	---- core scan ------------------------------------------------------------
+	set i to 1
+	set n to count inLines
+	
+	repeat while i ≤ n
+		set blockRemoved to false
+		
+		-- try block sizes 4, then 3, then 2
+		repeat with blockSize from 4 to 2 by -1
+			if (i + blockSize * 2 - 1) ≤ n then
+				set blockA to items i thru (i + blockSize - 1) of inLines
+				set blockB to items (i + blockSize) thru (i + blockSize * 2 - 1) of inLines
+				
+				if blockA is equal to blockB then
+					-- keep first copy only
+					repeat with L in blockA
+						set end of outLines to L
+					end repeat
+					
+					-- advance pointer past BOTH blocks
+					set i to i + (blockSize * 2)
+					
+					-- stats
+					set dupBlockCount to dupBlockCount + 1
+					set dupLinesTotal to dupLinesTotal + blockSize
+					
+					set blockRemoved to true
+					exit repeat
+				end if
+			end if
+		end repeat
+		
+		if blockRemoved is false then
+			-- no repeat here; copy line and advance one
+			set end of outLines to (item i of inLines)
+			set i to i + 1
+		end if
+	end repeat
+	
+	---- logging -------------------------------------------------------------
+	utilitiesScript's moduleLogInfo(handlerName, ¬
+		"Removed " & dupBlockCount & " duplicate blocks (" & dupLinesTotal & " lines)")
+	
+	return utilitiesScript's joinText(outLines, return)
+end deduplicateConsecutiveLineBlocksV2
+
+-------------------------------------------------------------------------------
+-- Handler: deduplicateConsecutiveLinesV2
+-- VERSION: 0.9.0-alpha (2025-05-23)
+-- PURPOSE: Removes runs of consecutive duplicate lines, trims whitespace for compare.
+-- INPUT: inputText (text)
+-- OUTPUT: outText (text)
+-- CHANGELOG:
+--   0.9.0-alpha (2025-05-23): v4-style, compares trimmed lines, output preserves original line.
+-------------------------------------------------------------------------------
+on deduplicateConsecutiveLinesV2(inputText)
+	global utilitiesScript
+	set linesList to paragraphs of utilitiesScript's forceText(inputText)
+	set cleanedLines to {}
+	set lastTrimmedLine to "[[[__UNIQUE__]]]"
+	repeat with thisLine in linesList
+		set trimmedLine to utilitiesScript's trimWhitespace(thisLine)
+		if trimmedLine ≠ lastTrimmedLine then
+			set end of cleanedLines to thisLine
+			set lastTrimmedLine to trimmedLine
+		end if
+	end repeat
+	set outText to utilitiesScript's joinText(cleanedLines, return)
+	return outText
+end deduplicateConsecutiveLinesV2
+
+-- ===================================================
+-- ===================================================
+
+-- Original Code - DONT TOUCH
+
+-- ===================================================
+-- ===================================================
+
+-- ===================================================
+-- VERSION:        6.0.0-alpha26 (2025-05-16)
+-- PURPOSE:        Batch-clean notes for contacts per the chosen scope,
+--                 with skip-mode, simulation, backups, and full reporting.
+-- PARAMETERS:
+--   • selectionScope : text    – "selected" or "all"
+--   • runInTestMode  : boolean – if true, runs in simulation (no writes)
+-- RETURNS: record with keys:
+--   • success   : boolean
+--   • cancelled : boolean
+--   • report    : text       – human-readable summary or skip-report
+--   • stats     : record     – {processed, modified, skipped, errors}
+-- ===================================================
+on processContactsWithScope(selectionScope as text, runInTestMode as boolean)
+	----------------------------------------------------------------
+	-- 0 ▸ Initialize & reset globals
+	----------------------------------------------------------------
+	global testMode
+	global contactsProcessed, contactsModified, totalOriginalLength
+	global totalCharsRemoved, errorCount
+	global inlineDuplicatesCount, blockDuplicatesCount, lineDuplicatesCount
+	
+	-- 0.1 ▸ Force defaults
+	if runInTestMode is missing value then set runInTestMode to false
+	set testMode to runInTestMode
+	-- 🔄 Do NOT reset forceCleanup here; it should be set by the UI or test code	
+	global forceCleanup
+	-- Debug: log the incoming forceCleanup value
+	utilitiesScript's moduleLogDebug("ContactOperations", "processContactsWithScope: forceCleanup=" & forceCleanup & ", defaultForceCleanupMode=" & defaultForceCleanupMode)
+	
+	-- Set skipProcessed: TRUE if and only if forceCleanup is EXACTLY the default value
+	if (forceCleanup as string) is (defaultForceCleanupMode as string) then
+		set shouldSkipProcessed to true
+	else
+		set shouldSkipProcessed to false
+	end if
+	
+	utilitiesScript's moduleLogDebug("ContactOperations", "processContactsWithScope: shouldSkipProcessed set to " & (shouldSkipProcessed as string))
+	
+	-- 0.2 ▸ Reset all counters
+	set contactsProcessed to 0
+	set contactsModified to 0
+	set totalOriginalLength to 0
+	set totalCharsRemoved to 0
+	set errorCount to 0
+	set inlineDuplicatesCount to 0
+	set blockDuplicatesCount to 0
+	set lineDuplicatesCount to 0
+	
+	-- Track how many we skip in skip-mode
+	set skippedContacts to 0
+	
+	utilitiesScript's moduleLogInfo("ContactOperations", "▶ Starting batch-clean • scope=" & selectionScope & ¬
+		" • testMode=" & testMode & ¬
+		" • skipProcessed=" & shouldSkipProcessed)
+	
+	----------------------------------------------------------------
+	-- 1 ▸ Build the contact list
+	----------------------------------------------------------------
+	set contactsToProcess to {}
+	try
+		tell application "Contacts"
+			if selectionScope is "selected" then
+				set contactsToProcess to selection
+			else
+				set contactsToProcess to every person
+			end if
+		end tell
+	on error fetchErr
+		utilitiesScript's moduleLogError("ContactOperations", "Failed to fetch contacts: " & fetchErr)
+		return {success:false, cancelled:false, report:"", stats:{processed:0, modified:0, skipped:0, errors:errorCount + 1}}
+	end try
+	
+	if (count of contactsToProcess) = 0 then
+		utilitiesScript's moduleLogInfo("ContactOperations", "No contacts found for scope: " & selectionScope)
+		return {success:true, cancelled:true, report:"No contacts to process (“" & selectionScope & "” scope)", stats:{processed:0, modified:0, skipped:0, errors:0}}
+	end if
+	
+	----------------------------------------------------------------
+	-- 2 ▸ Prefilter out already-processed (skip-mode)
+	----------------------------------------------------------------
+	if shouldSkipProcessed then
+		utilitiesScript's moduleLogInfo("ContactOperations", "Skip-mode ON → filtering out notes with existing CCC footer")
+		
+		-- Track which contacts get skipped
+		set skippedContacts to 0
+		set skippedContactsList to {}
+		
+		set filteredContacts to {}
+		repeat with c in contactsToProcess
+			try
+				-- Safely read the note (empty → "")
+				tell application "Contacts"
+					if note of c is missing value then
+						set noteText to ""
+						utilitiesScript's moduleLogDebug("ContactOperations", "Empty note for: " & (name of c))
+					else
+						set noteText to note of c as text
+					end if
+				end tell
+				
+				-- Skip if it already contains our CCC footer marker
+				if noteText contains "==== CCC Summary ====" then
+					set skippedContacts to skippedContacts + 1
+					copy c to end of skippedContactsList
+					utilitiesScript's moduleLogDebug("ContactOperations", "Skipping already-processed: " & (name of c))
+				else
+					-- Otherwise, include it for processing
+					copy c to end of filteredContacts
+				end if
+				
+			on error chkErr
+				-- On any error checking footer, process the contact anyway
+				copy c to end of filteredContacts
+				utilitiesScript's moduleLogWarning("ContactOperations", "Footer check failed (processing anyway): " & chkErr)
+			end try
+		end repeat
+		
+		-- 2.1 ▸ SHORT-CIRCUIT if nothing left to do
+		if (count of filteredContacts) = 0 then
+			set skipReport to generateSkipReport(skippedContactsList)
+			return ¬
+				¬
+					¬
+						{success:true, cancelled:false, report:skipReport, stats:¬
+							¬
+								¬
+									¬
+										{processed:0, modified:0, skipped:skippedContacts, errors:0, charsRemoved:totalCharsRemoved} ¬
+											} ¬
+							
+		end if
+		
+		-- Replace original list with the filtered one
+		set contactsToProcess to filteredContacts
+		utilitiesScript's moduleLogInfo("ContactOperations", "After filtering: " & (count of contactsToProcess) & " to process, " & skippedContacts & " skipped")
+		
+	else
+		utilitiesScript's moduleLogInfo("ContactOperations", "Skip-mode OFF → processing all " & (count of contactsToProcess) & " contacts")
+	end if
+	
+	----------------------------------------------------------------
+	-- 3 ▸ Process each contact
+	----------------------------------------------------------------
+	repeat with c in contactsToProcess
+		set contactsProcessed to contactsProcessed + 1
+		try
+			-- a) Record original length
+			tell application "Contacts"
+				set origNote to note of c as text
+			end tell
+			set totalOriginalLength to totalOriginalLength + (length of origNote)
+			
+			-- b) Clean the note
+			set noteInfo to my processContactNoteV2(c, testMode)
+			-- c) Tally modifications
+			if noteInfo's modified then
+				set contactsModified to contactsModified + 1
+				set totalCharsRemoved to totalCharsRemoved + (noteInfo's charsRemoved)
+			end if
+			
+		on error procErr
+			set errorCount to errorCount + 1
+			utilitiesScript's moduleLogError("ContactOperations", "Error processing “" & (name of c) & "”: " & procErr)
+		end try
+	end repeat
+	
+	-- 3.1 ▸ Restore forceCleanup default for next run
+	set forceCleanup to defaultForceCleanupMode
+	
+	----------------------------------------------------------------
+	-- 4 ▸ Build and return the final report + stats
+	----------------------------------------------------------------
+	set fullReport to generateProcessingReport()
+	utilitiesScript's moduleLogInfo("ContactOperations", "✔ Batch complete • processed=" & contactsProcessed & ¬
+		" • modified=" & contactsModified & ¬
+		" • skipped=" & skippedContacts & ¬
+		" • errors=" & errorCount)
+	
+	return {success:true, cancelled:false, report:fullReport, stats:{processed:contactsProcessed, modified:contactsModified, skipped:skippedContacts, errors:errorCount, charsRemoved:totalCharsRemoved}}
+end processContactsWithScope
+
+
+
+-------------------------------------------------------------------------------
+-- GENERATE CLEANUP SUMMARY REPORT
+-- on generateStatsReport(statsRecord, scriptVersion)
+--   Builds the final cleanup summary text, using the unified counters.
+-------------------------------------------------------------------------------
+on generateStatsReport()
+	utilitiesScript's moduleLogInfo("ContactOperations", "ContactCleaning", "Generating cleanup summary report")
+	
+	-- Ensure access to global counters
+	global contactsProcessed, contactsModified, totalOriginalLength, totalCharsRemoved
+	global startTime, inlineDuplicatesCount, lineDuplicatesCount, blockDuplicatesCount
+	global testMode, scriptVersion
+	
+	-- Timing
+	set endTime to current date
+	set elapsedSeconds to endTime - startTime
+	set avgTimePerContact to 0
+	if contactsProcessed > 0 then set avgTimePerContact to elapsedSeconds / contactsProcessed
+	
+	-- Header
+	set reportText to "✅ Cleanup Summary (" & scriptVersion & ")" & return & return
+	-- First determine the pipeline string
+	set pipelineString to "ORIGINAL (v1)"
+	if useNewPipeline then
+		set pipelineString to "NEW (v2)"
+	end if
+	
+	-- Then add it to the report
+	set reportText to reportText & return & "Pipeline: " & pipelineString & return
+	
+	-- 📊 Process Stats
+	set reportText to reportText & "📊 Process Stats:" & return
+	set reportText to reportText & "• Contacts processed: " & contactsProcessed & return
+	set reportText to reportText & "• Contacts with content cleaned: " & contactsModified & return
+	
+	-- 💾 Data Cleanup
+	set reportText to reportText & return & "💾 Data Cleanup:" & return
+	set reportText to reportText & "• Total characters processed: " & totalOriginalLength & return
+	set reportText to reportText & "• Total characters removed: " & totalCharsRemoved & return
+	-- ▸ Shared metrics
+	set cleanupMetrics to utilitiesScript's computeReductionMetrics(totalCharsRemoved, totalOriginalLength)
+	set reportText to reportText & "• Percentage reduction: " & ((round ((cleanupMetrics's pct) * 100)) / 100) & "%" & return & return
+	
+	-- ⏱ Performance
+	set reportText to reportText & "⏱ Performance:" & return
+	set reportText to reportText & "• Total processing time: " & elapsedSeconds & " seconds" & return
+	set reportText to reportText & "• Average per contact: " & ((round (avgTimePerContact * 100)) / 100) & " seconds" & return
+	
+	-- ENHANCEMENT: Add simulation mode notice
+	if testMode then
+		set reportText to reportText & return & "⚠️ SIMULATION NOTICE:" & return
+		set reportText to reportText & "• No actual changes were made to your contacts" & return
+		set reportText to reportText & "• This report shows what would happen in normal mode" & return
+	end if
+	
+	return reportText
+end generateStatsReport
+
+-- 🏷 Issue Summary (for next iteration)
+(*
+	if tagLinkedIn > 0 or tagDupLinkedIn > 0 or tagDupURL > 0 or tagMultiProfile > 0 then
+		utilitiesScript's moduleLogDebug("ContactOperations","Adding tag summary section to report")
+		set reportText to reportText & return & "🏷 Issue Summary:" & return
+		if tagLinkedIn > 0 then set reportText to reportText & "• 🔗 LinkedIn tracking parameters: " & tagLinkedIn & " contact(s)" & return
+		if tagDupLinkedIn > 0 then set reportText to reportText & "• 👤 Duplicate LinkedIn profiles: " & tagDupLinkedIn & " contact(s)" & return
+		if tagDupURL > 0 then set reportText to reportText & "• 🔄 Duplicate URLs detected: " & tagDupURL & " contact(s)" & return
+		if tagMultiProfile > 0 then set reportText to reportText & "• 👥 Multiple profiles found: " & tagMultiProfile & " contact(s)" & return
+	end if
+	*)
+
+
+-- ===================================================
+-- STUB: generateProcessingReport
+-- Replace old inline implementation with a simple delegation to generateStatsReport
+-- ===================================================
+on generateProcessingReport()
+	utilitiesScript's moduleLogInfo("ContactOperations", "Delegating processing report")
+	return my generateStatsReport()
+end generateProcessingReport
+
+-------------------------------------------------------------------------------
+-- Handler: saveReportToFile
+-- VERSION: 1.0.0-unified (2025-05-21)
+-- PURPOSE: Unified file save for ContactOperations reports using Utilities.
+--          Ensures folder exists, file is touched, logs via Utilities.
+--          Returns true on success, false on failure.
+-------------------------------------------------------------------------------
+on saveReportToFile(reportText, reportPath)
+	global utilitiesScript
+	
+	try
+		-- Ensure parent folder exists
+		set AppleScript's text item delimiters to ":"
+		set pathItems to text items of reportPath
+		if (count of pathItems) > 1 then
+			set parentFolder to (items 1 thru -2 of pathItems as string) & ":"
+			utilitiesScript's createFolderPath(parentFolder)
+		end if
+		set AppleScript's text item delimiters to ""
+		
+		-- Touch file to guarantee alias coercion works
+		try
+			do shell script "touch " & quoted form of (POSIX path of reportPath)
+		end try
+		
+		-- Save the file using unified Utilities handler
+		set saveResult to utilitiesScript's saveTextToFile(reportText, reportPath)
+		
+		-- Logging through Utilities
+		if saveResult is true then
+			utilitiesScript's directFileLog("ContactOperations", "ContactOperations report saved to: " & reportPath, kLogLevelInfo)
+			
+			return true
+		else
+			utilitiesScript's directFileLog("ContactOperations", "saveReportToFile failed for: " & reportPath, kLogLevelError)
+			return false
+		end if
+		
+	on error errMsg
+		utilitiesScript's directFileLog("ContactOperations", "saveReportToFile exception: " & errMsg & " (" & reportPath & ")", kLogLevelError)
+		return false
+	end try
+end saveReportToFile
+
+-- ==========================================================
+-- vCard BACKUP/RESTORE/VERSIONING
+-- ==========================================================
+
+-- Contact vCard backup with standardized logging
+on createContactVCardBackup(theContact)
+	utilitiesScript's moduleLogInfo("ContactOperations", "Creating vCard backup for contact")
+	
+	-- Validate input
+	if theContact is missing value then
+		utilitiesScript's moduleLogError("ContactOperations", "Invalid contact object passed to createContactVCardBackup")
+		return {success:false, reason:"Invalid contact object", path:""}
+	end if
+	
+	try
+		-- Get contact name for backup file
+		set contactName to "Unknown"
+		try
+			tell application "Contacts"
+				set contactName to name of theContact
+			end tell
+			utilitiesScript's moduleLogDebug("ContactOperations", "Got contact name: " & contactName)
+		on error nameErr
+			utilitiesScript's moduleLogError("ContactOperations", "Error getting contact name: " & nameErr)
+			-- Generate random name as fallback
+			set contactName to "Contact-" & (random number from 1000 to 9999)
+			utilitiesScript's moduleLogDebug("ContactOperations", "Using generated fallback name: " & contactName)
+		end try
+		
+		-- Export contact as vCard
+		utilitiesScript's moduleLogDebug("ContactOperations", "Exporting contact as vCard")
+		try
+			tell application "Contacts"
+				-- Get vCard content directly using vcard property
+				set vCardContent to vcard of theContact as text
+			end tell
+			
+			set vCardLength to length of vCardContent
+			utilitiesScript's moduleLogInfo("ContactOperations", "Successfully exported vCard for " & contactName & " (" & vCardLength & " bytes)")
+			
+			-- Create versioned backup via utilities module
+			if utilitiesScript is not missing value then
+				utilitiesScript's moduleLogDebug("ContactOperations", "Creating versioned backup through Utilities module")
+				set backupResult to utilitiesScript's createVersionedBackup(contactName, vCardContent, "vcard")
+				
+				-- Log result details
+				if backupResult's success then
+					utilitiesScript's moduleLogInfo("ContactOperations", "vCard backup successful: " & backupResult's path)
+				else
+					utilitiesScript's moduleLogError("ContactOperations", "vCard backup failed: " & backupResult's errorMessage)
+				end if
+				
+				return backupResult
+			else
+				utilitiesScript's moduleLogError("ContactOperations", "Utilities module not available for backup")
+				return {success:false, reason:"Utilities module not available", path:""}
+			end if
+		on error vCardErr
+			utilitiesScript's moduleLogError("ContactOperations", "Error exporting vCard: " & vCardErr)
+			return {success:false, reason:"vCard export failed: " & vCardErr, path:""}
+		end try
+	on error errMsg
+		utilitiesScript's moduleLogError("ContactOperations", "vCard backup error: " & errMsg)
+		return {success:false, reason:errMsg, path:""}
+	end try
+end createContactVCardBackup
+
+-- Restore a contact from vCard data with improved error handling
+on restoreContactFromVCard(vCardContent)
+	utilitiesScript's moduleLogInfo("ContactOperations", "Restoring contact from vCard")
+	
+	-- Validate input
+	if vCardContent is missing value or vCardContent is "" then
+		utilitiesScript's moduleLogError("ContactOperations", "Invalid vCard content (empty or missing) passed to restoreContactFromVCard")
+		return {success:false, reason:"Invalid vCard content", path:""}
+	end if
+	
+	-- Create temporary file for import
+	set tempFolder to (path to temporary items from user domain as string)
+	set tempVCardPath to tempFolder & "temp_restore.vcf"
+	utilitiesScript's moduleLogDebug("ContactOperations", "Using temporary file: " & tempVCardPath)
+	
+	-- Declare file variable for proper scope in error handling
+	set tempFile to missing value
+	
+	try
+		-- Write vCard to temp file
+		utilitiesScript's moduleLogDebug("ContactOperations", "Writing vCard content to temporary file (" & (length of vCardContent) & " bytes)")
+		try
+			set tempFile to open for access tempVCardPath with write permission
+			set eof of tempFile to 0
+			write vCardContent to tempFile
+			close access tempFile
+			utilitiesScript's moduleLogInfo("ContactOperations", "vCard content written to temporary file successfully")
+		on error writeErr
+			utilitiesScript's moduleLogError("ContactOperations", "Error writing vCard to temporary file: " & writeErr)
+			-- Try to close file if it was opened
+			try
+				close access tempFile
+			end try
+			return {success:false, reason:"Failed to write temporary vCard file: " & writeErr}
+		end try
+		
+		-- Import the vCard
+		utilitiesScript's moduleLogInfo("ContactOperations", "Importing vCard into Contacts app")
+		try
+			tell application "Contacts"
+				import from file tempVCardPath
+				save
+				utilitiesScript's moduleLogInfo("ContactOperations", "Contact successfully imported and saved")
+			end tell
+		on error importErr
+			utilitiesScript's moduleLogError("ContactOperations", "Error importing vCard into Contacts: " & importErr)
+			return {success:false, reason:"Import failed: " & importErr}
+		end try
+		
+		-- Delete temp file
+		utilitiesScript's moduleLogDebug("ContactOperations", "Cleaning up temporary file")
+		try
+			tell application "Finder"
+				if exists file tempVCardPath then
+					delete file tempVCardPath
+					utilitiesScript's moduleLogDebug("ContactOperations", "Temporary file deleted successfully")
+				end if
+			end tell
+		on error cleanupErr
+			utilitiesScript's moduleLogWarning("ContactOperations", "Error cleaning up temporary file: " & cleanupErr)
+			-- Continue despite cleanup error
+		end try
+		
+		utilitiesScript's moduleLogInfo("ContactOperations", "Contact restored successfully from vCard")
+		return {success:true, reason:"Contact restored successfully"}
+	on error errMsg
+		utilitiesScript's moduleLogError("ContactOperations", "vCard restore operation failed: " & errMsg)
+		
+		-- Cleanup on error
+		try
+			close access tempFile
+		end try
+		try
+			tell application "Finder"
+				if exists file tempVCardPath then
+					delete file tempVCardPath
+					utilitiesScript's moduleLogDebug("ContactOperations", "Cleaned up temporary file after error")
+				end if
+			end tell
+		end try
+		
+		return {success:false, reason:errMsg}
+	end try
+end restoreContactFromVCard
+
+-- Restore contact note from backup by ID or from latest backup
+on restoreContactNoteFromBackup(contactName, backupID)
+	utilitiesScript's moduleLogInfo("ContactOperations", "Attempting to restore contact note from backup")
+	
+	-- Initialize result
+	set restoreResult to {success:false, reason:"Not attempted"}
+	
+	-- If no specific backupID is provided, find the latest backup
+	if backupID is "" or backupID is missing value then
+		utilitiesScript's moduleLogInfo("ContactOperations", "No specific backup ID provided - searching for latest backup")
+		
+		-- Try to find the latest backup for this contact
+		if utilitiesScript is not missing value then
+			set latestBackupPath to utilitiesScript's findLatestBackup(contactName, "note")
+			
+			if latestBackupPath is not "" then
+				utilitiesScript's moduleLogInfo("ContactOperations", "Latest backup found at: " & latestBackupPath)
+				
+				-- Now extract content
+				set backupContent to utilitiesScript's extractContentFromBackup(latestBackupPath)
+				
+				-- Remove any backup metadata lines if present
+				if backupContent starts with "BackupID: " then
+					-- Skip metadata lines (look for first double return)
+					set metadataEndPos to offset of (return & return) in backupContent
+					if metadataEndPos > 0 then
+						set backupContent to text (metadataEndPos + 2) thru -1 of backupContent
+					end if
+				end if
+				
+				-- We now have the cleaned note content
+				set restoreResult to {success:true, content:backupContent, path:latestBackupPath, reason:"Restored from latest backup"}
+			else
+				utilitiesScript's moduleLogError("ContactOperations", "No backup found for contact: " & contactName)
+				set restoreResult to {success:false, reason:"No backup found for contact"}
+			end if
+		else
+			-- Try emergency search on desktop and documents
+			utilitiesScript's moduleLogWarning("ContactOperations", "Utilities module not available - searching for emergency backups")
+			
+			try
+				-- Places to search for emergency backups
+				set searchLocations to {}
+				set end of searchLocations to (path to desktop folder as string)
+				set end of searchLocations to (path to documents folder as string) & "CCC Script:EmergencyBackups:"
+				
+				-- Search each location
+				repeat with searchPath in searchLocations
+					try
+						set searchPattern to "EmergencyBackup_" & contactName & "_*.txt"
+						set filesCmd to "find " & quoted form of (POSIX path of searchPath) & " -name " & quoted form of searchPattern & " -type f | sort -r | head -n 1"
+						set foundFile to do shell script filesCmd
+						
+						if foundFile is not "" then
+							-- Found an emergency backup
+							utilitiesScript's moduleLogInfo("ContactOperations", "Found emergency backup: " & foundFile)
+							
+							-- Read its contents
+							set fileContents to do shell script "cat " & quoted form of foundFile
+							
+							-- Extract the actual note content (after the metadata section)
+							set markerText to "==================================="
+							if fileContents contains markerText then
+								set contentStartPos to offset of markerText in fileContents
+								set noteContent to text ((contentStartPos + (length of markerText)) + 2) thru -1 of fileContents
+								
+								set restoreResult to {success:true, content:noteContent, path:foundFile, reason:"Restored from emergency backup"}
+								exit repeat
+							end if
+						end if
+					on error
+						-- Continue to next location
+					end try
+				end repeat
+				
+				-- If we still don't have a backup
+				if not restoreResult's success then
+					utilitiesScript's moduleLogError("ContactOperations", "No emergency backups found for contact: " & contactName)
+					set restoreResult to {success:false, reason:"No emergency backups found"}
+				end if
+			on error searchErr
+				utilitiesScript's moduleLogError("ContactOperations", "Error searching for emergency backups: " & searchErr)
+				set restoreResult to {success:false, reason:"Error searching for backups: " & searchErr}
+			end try
+		end if
+	else
+		-- Search for a specific backup by ID
+		utilitiesScript's moduleLogInfo("ContactOperations", "Searching for backup with ID: " & backupID)
+		
+		-- [Implementation for specific backup ID search would go here]
+		-- This would involve checking logs for the BACKUP-REFERENCE entries
+		-- and then extracting the path from there to find the specific backup
+		
+		-- For now, we'll just indicate this feature is not yet implemented
+		utilitiesScript's moduleLogWarning("ContactOperations", "Restoring from specific backup ID not yet implemented")
+		set restoreResult to {success:false, reason:"Restoring from specific backup ID not yet implemented"}
+	end if
+	
+	return restoreResult
+end restoreContactNoteFromBackup
+
+-- Extract and restore only social profiles from a vCard
+on restoreSocialProfilesOnly(entityName, vCardContent)
+	utilitiesScript's moduleLogInfo("ContactOperations", "Extracting and restoring only social profiles for " & entityName)
+	
+	-- Validate inputs
+	if entityName is missing value or entityName is "" then
+		utilitiesScript's moduleLogError("ContactOperations", "Invalid entity name passed to restoreSocialProfilesOnly")
+		return {success:false, reason:"Invalid entity name"}
+	end if
+	
+	if vCardContent is missing value or vCardContent is "" then
+		utilitiesScript's moduleLogError("ContactOperations", "Invalid vCard content (empty or missing) passed to restoreSocialProfilesOnly")
+		return {success:false, reason:"Invalid vCard content"}
+	end if
+	
+	try
+		-- Extract social profile data from vCard
+		utilitiesScript's moduleLogDebug("ContactOperations", "Extracting social profiles from vCard content (" & (length of vCardContent) & " bytes)")
+		set socialProfiles to extractSocialProfilesFromVCard(vCardContent)
+		
+		if socialProfiles is {} then
+			utilitiesScript's moduleLogInfo("ContactOperations", "No social profiles found in vCard backup")
+			return {success:false, reason:"No social profiles found in backup"}
+		end if
+		
+		utilitiesScript's moduleLogInfo("ContactOperations", "Found " & (count of socialProfiles) & " social profiles in vCard")
+		
+		-- Find the contact to update
+		utilitiesScript's moduleLogDebug("ContactOperations", "Searching Contacts for " & entityName)
+		tell application "Contacts"
+			set matchingContacts to every person whose name is entityName
+			set contactCount to count of matchingContacts
+			
+			if contactCount is 0 then
+				utilitiesScript's moduleLogWarning("ContactOperations", "Contact not found: " & entityName)
+				return {success:false, reason:"Contact not found: " & entityName}
+			end if
+			
+			if contactCount > 1 then
+				utilitiesScript's moduleLogWarning("ContactOperations", "Multiple contacts found with name: " & entityName & " (using first match)")
+			end if
+			
+			-- Use the first matching contact
+			set theContact to item 1 of matchingContacts
+			utilitiesScript's moduleLogDebug("ContactOperations", "Contact found, preparing to update social profiles")
+			
+			-- Clear existing social profiles
+			try
+				set existingProfiles to social profiles of theContact
+				set existingCount to count of existingProfiles
+				
+				if existingCount > 0 then
+					utilitiesScript's moduleLogInfo("ContactOperations", "Removing " & existingCount & " existing social profiles")
+					repeat with oldProfile in existingProfiles
+						delete oldProfile
+					end repeat
+				else
+					utilitiesScript's moduleLogDebug("ContactOperations", "No existing social profiles to remove")
+				end if
+			on error clearErr
+				utilitiesScript's moduleLogError("ContactOperations", "Error clearing existing social profiles: " & clearErr)
+				return {success:false, reason:"Failed to clear existing profiles: " & clearErr}
+			end try
+			
+			-- Add restored profiles
+			set addedCount to 0
+			utilitiesScript's moduleLogDebug("ContactOperations", "Adding " & (count of socialProfiles) & " social profiles")
+			
+			repeat with profileData in socialProfiles
+				try
+					-- Log the service being added
+					utilitiesScript's moduleLogDebug("ContactOperations", "Adding " & profileData's service & " profile")
+					
+					make new social profile at end of social profiles of theContact with properties {service name:profileData's service, url:profileData's url}
+					set addedCount to addedCount + 1
+				on error addErr
+					utilitiesScript's moduleLogWarning("ContactOperations", "Error adding " & profileData's service & " profile: " & addErr)
+					-- Continue adding other profiles
+				end try
+			end repeat
+			
+			-- Save changes
+			utilitiesScript's moduleLogInfo("ContactOperations", "Saving contact with " & addedCount & " restored social profiles")
+			save
+		end tell
+		
+		utilitiesScript's moduleLogInfo("ContactOperations", "Successfully restored " & addedCount & " social profiles to " & entityName)
+		return {success:true, reason:"Restored " & addedCount & " social profiles"}
+	on error errMsg
+		utilitiesScript's moduleLogError("ContactOperations", "Social profile restoration error: " & errMsg)
+		return {success:false, reason:errMsg}
+	end try
+end restoreSocialProfilesOnly
+
+-- Extract social profile data from vCard content
+on extractSocialProfilesFromVCard(vCardContent)
+	utilitiesScript's moduleLogInfo("ContactOperations", "Extracting social profiles from vCard")
+	
+	-- Initialize empty profiles array
+	set profiles to {}
+	
+	-- Validate input
+	if vCardContent is missing value or vCardContent is "" then
+		utilitiesScript's moduleLogWarning("ContactOperations", "Empty or missing vCard content in extractSocialProfilesFromVCard")
+		return profiles
+	end if
+	
+	-- Log content size for debugging
+	utilitiesScript's moduleLogDebug("ContactOperations", "Processing vCard content of " & (length of vCardContent) & " bytes")
+	
+	try
+		-- Parse vCard for social profile entries
+		set ASTID to AppleScript's text item delimiters
+		set AppleScript's text item delimiters to return
+		set vCardLines to text items of vCardContent
+		set AppleScript's text item delimiters to ASTID
+		
+		utilitiesScript's moduleLogDebug("ContactOperations", "Split vCard into " & (count of vCardLines) & " lines")
+		
+		-- Track found profile types for logging
+		set foundProfileTypes to {}
+		
+		repeat with currentLine in vCardLines
+			if currentLine contains "X-SOCIALPROFILE" then
+				-- Extract URL and service
+				set serviceType to "Other"
+				set profileURL to ""
+				
+				-- Determine service type
+				if currentLine contains "TYPE=linkedin" then
+					set serviceType to "LinkedIn"
+				else if currentLine contains "TYPE=facebook" then
+					set serviceType to "Facebook"
+				else if currentLine contains "TYPE=twitter" then
+					set serviceType to "Twitter"
+				else if currentLine contains "TYPE=instagram" then
+					set serviceType to "Instagram"
+				else
+					-- For other types, try to extract the service name if present
+					try
+						if currentLine contains "TYPE=" then
+							set typeStartPos to offset of "TYPE=" in currentLine
+							set typeText to text (typeStartPos + 5) thru -1 of currentLine
+							
+							-- Find the end of the type value
+							set typeEndPos to offset of ";" in typeText
+							if typeEndPos > 0 then
+								set extractedType to text 1 thru (typeEndPos - 1) of typeText
+								-- Capitalize first letter for consistent display
+								set firstChar to text 1 thru 1 of extractedType
+								set restChars to text 2 thru -1 of extractedType
+								set serviceType to (uppercase of firstChar) & restChars
+								
+								utilitiesScript's moduleLogDebug("ContactOperations", "Extracted custom service type: " & serviceType)
+							end if
+						end if
+					on error typeErr
+						utilitiesScript's moduleLogDebug("ContactOperations", "Could not extract custom service type: " & typeErr)
+						-- Keep "Other" as fallback
+					end try
+				end if
+				
+				-- Extract URL
+				if currentLine contains ":" then
+					set urlStartPos to offset of ":" in currentLine
+					set profileURL to text (urlStartPos + 1) thru -1 of currentLine
+					utilitiesScript's moduleLogDebug("ContactOperations", "Extracted URL for " & serviceType & " profile")
+				end if
+				
+				-- Only add profile if we have a valid URL
+				if profileURL is not "" then
+					set end of profiles to {service:serviceType, URL:profileURL}
+					
+					-- Add to list of found types for summary
+					if foundProfileTypes does not contain serviceType then
+						set end of foundProfileTypes to serviceType
+					end if
+					
+					utilitiesScript's moduleLogDebug("ContactOperations", "Added " & serviceType & " profile")
+				else
+					utilitiesScript's moduleLogWarning("ContactOperations", "Found " & serviceType & " profile but couldn't extract URL")
+				end if
+			end if
+		end repeat
+		
+		-- Log summary of extracted profiles
+		set profileCount to count of profiles
+		if profileCount > 0 then
+			utilitiesScript's moduleLogInfo("ContactOperations", "Successfully extracted " & profileCount & " social profiles: " & my joinListWithCommas(foundProfileTypes))
+		else
+			utilitiesScript's moduleLogInfo("ContactOperations", "No social profiles found in vCard")
+		end if
+	on error errMsg
+		utilitiesScript's moduleLogError("ContactOperations", "Error extracting social profiles from vCard: " & errMsg)
+		-- Reset delimiters on error
+		try
+			set AppleScript's text item delimiters to ASTID
+		end try
+	end try
+	
+	return profiles
+end extractSocialProfilesFromVCard
+
+-- Helper function to join a list with commas
+on joinListWithCommas(theList)
+	set result to ""
+	repeat with i from 1 to count of theList
+		set currentItem to item i of theList
+		if i is 1 then
+			set result to currentItem
+		else if i is (count of theList) then
+			set result to result & " and " & currentItem
+		else
+			set result to result & ", " & currentItem
+		end if
+	end repeat
+	return result
+end joinListWithCommas
+
+-- ==========================================================
+-- CONTACT PROCESSING
+-- ==========================================================
+
+-----
+-- CONTACT PROCESSING CLEANUP HANDLERS
+-----
+
+-------------------------------------------------------------------------------
+-- Handler: trimLeadingTrailingBlankLines
+-- VERSION: 0.9.0-alpha (2025-05-23)
+-- PURPOSE:
+--   Removes blank lines at the very beginning or end of a note.
+--   Ensures output always starts and ends with real content (not blank).
+-- INPUT: inputText (text)
+-- OUTPUT: outText (text)
+-- CHANGELOG:
+--   0.9.0-alpha (2025-05-23): Minimal, robust, bulletproof.
+-------------------------------------------------------------------------------
+on trimLeadingTrailingBlankLines(inputText)
+	global utilitiesScript
+	set linesList to paragraphs of utilitiesScript's forceText(inputText)
+	-- Remove leading blanks
+	repeat while ((count of linesList) > 0) and (item 1 of linesList = "")
+		set linesList to items 2 thru -1 of linesList
+	end repeat
+	-- Remove trailing blanks
+	repeat while ((count of linesList) > 0) and (item -1 of linesList = "")
+		set linesList to items 1 thru -2 of linesList
+	end repeat
+	set outText to utilitiesScript's joinText(linesList, return)
+	return outText
+end trimLeadingTrailingBlankLines
+
+-- ===================================================
+-- Handler: backupContactNoteWithType
+-- VERSION: 0.9.0-alpha2 (2025-05-21)
+-- PURPOSE: Save a versioned backup of contact note with pipeline version indicator
+-- INPUTS:  aPerson - contact record
+--          contactName - name of contact
+--          noteText - note content to backup
+--          backupType - type of backup (e.g. "note", "processed")
+-- RETURNS: path to backup file or empty string if failed
+-- ===================================================
+on backupContactNoteWithType(aPerson, contactName, noteText, backupType)
+	global utilitiesScript, useNewPipeline
+	set safeText to noteText
+	
+	-- Add pipeline version to the backup type for processed notes
+	set backupTypeWithVersion to backupType
+	if backupType is "processed" then
+		if useNewPipeline then
+			set backupTypeWithVersion to "processed-v2"
+		else
+			set backupTypeWithVersion to "processed-v1"
+		end if
+	end if
+	
+	utilitiesScript's moduleLogDebug("ContactOperations", "Backing up " & backupTypeWithVersion & " note for " & contactName)
+	
+	try
+		set resultRec to utilitiesScript's createVersionedBackup(contactName, safeText, backupTypeWithVersion)
+	on error errMsg
+		utilitiesScript's moduleLogWarning("ContactOperations", "Backup helper error for " & contactName & " (" & backupTypeWithVersion & "): " & errMsg)
+		return ""
+	end try
+	
+	if resultRec's success as boolean then
+		utilitiesScript's moduleLogDebug("ContactOperations", "Backup (" & backupTypeWithVersion & ") created at: " & (resultRec's path as text))
+		return resultRec's path as string
+	else
+		utilitiesScript's moduleLogWarning("ContactOperations", "Backup (" & backupTypeWithVersion & ") failed for " & contactName & ": " & (resultRec's errorMessage as text))
+		return ""
+	end if
+end backupContactNoteWithType
+
+-- ==========================================================
+-- TEXT PROCESSING
+-- ==========================================================
+
+-- VERSION: 6.0.0-alpha26
+-- PURPOSE: Explicitly set forceCleanup mode for next batch run
+on setForceCleanupMode(newMode)
+	global forceCleanup
+	if newMode is missing value or newMode is "" then
+		set forceCleanup to defaultForceCleanupMode
+	else
+		set forceCleanup to newMode
+	end if
+	utilitiesScript's moduleLogInfo("ContactOperations", "forceCleanup mode set to: " & forceCleanup)
+	return true
+end setForceCleanupMode
+
+
+-- ==========================================================
+-- CONTACT NOTE FOOTER FUNCTIONS
+-- ==========================================================
+
+-- ===================================================
+--  extractExistingFooter(noteText) → text
+--  VERSION: 6.0.0-alpha25+footerDetect (2025-05-16)
+--  PURPOSE: If noteText contains the footer marker, return the footer block
+--           (from the marker to the end), else return "".
+-- ===================================================
+on extractExistingFooter(noteText as text)
+	if noteText contains "==== CCC Summary ====" then
+		set idx to offset of "==== CCC Summary ====" in noteText
+		return text idx thru -1 of noteText
+	else
+		return ""
+	end if
+end extractExistingFooter
+
+
+-- ===================================================
+--  parseFooterLine(footerText, label) → text
+--
+--  Finds the first line in footerText that begins with `label`
+--  (including the trailing colon) and returns the remainder of that line.
+--  If not found, returns empty string.
+-- ===================================================
+on parseFooterLine(footerText as text, label as text)
+	repeat with L in paragraphs of footerText
+		if L starts with label then
+			-- skip the label + following space
+			return text ((length of label) + 2) thru -1 of L
+		end if
+	end repeat
+	return ""
+end parseFooterLine
+
+-- ===================================================
+--  hasCCCFooter(noteText) → boolean
+--  VERSION: 6.0.0-alpha25+footerDetect (2025-05-16)
+--  PURPOSE: Return true if the note already ends with a CCC Footer—
+--           i.e. contains the exact marker "==== CCC Summary ====".
+-- ===================================================
+on hasCCCFooter(noteText as text)
+	return noteText contains "==== CCC Summary ===="
+end hasCCCFooter
+
+-- ===================================================
+--  updateCCCFooter(noteContent, charsRemoved, originalLength, wasModified) → text
+--
+--  Builds a fresh CCC Summary footer that:
+--    • Preserves the prior “modification” date and removals under “Previous …”  
+--    • Records a new “CCC cleaned on:” date if edits occurred  
+--    • Always updates “Last checked:” to today’s timestamp  
+--  Ensures exactly one blank line before the trailer.
+-- ===================================================
+on updateCCCFooter(noteContent as text, charsRemoved as integer, originalLength as integer, wasModified as boolean)
+	-- pull out the old footer, if any
+	set oldFooter to extractExistingFooter(noteContent)
+	-- determine prior mod date & removals
+	set prevMod to parseFooterLine(oldFooter, "CCC cleaned on:")
+	if prevMod is "" then set prevMod to parseFooterLine(oldFooter, "Modified by CCC:")
+	set prevRemovals to parseFooterLine(oldFooter, "Characters removed:")
+	
+	-- strip existing footer from the body
+	if oldFooter ≠ "" then
+		set bodyText to text 1 thru ((offset of oldFooter in noteContent) - 1) of noteContent
+	else
+		set bodyText to noteContent
+	end if
+	
+	-- clean up trailing blank lines
+	repeat while bodyText ends with return or bodyText ends with linefeed
+		set bodyText to text 1 thru -2 of bodyText
+	end repeat
+	
+	-- build new footer lines, **always** start with the header
+	set newFooterLines to {"==== CCC Summary ===="}
+	
+	if prevMod ≠ "" then
+		copy ("Previous mod date: " & prevMod) to end of newFooterLines
+		if prevRemovals ≠ "" then copy ("Previous removals: " & prevRemovals) to end of newFooterLines
+	else
+		-- on first run, preserve the original “Last modification before CCC:” if present
+		set origMod to parseFooterLine(oldFooter, "Last modification before CCC:")
+		if origMod ≠ "" then copy ("Last modification before CCC: " & origMod) to end of newFooterLines
+	end if
+	
+	-- record this run’s cleaning if characters were removed
+	if wasModified then
+		set nowStamp to formatDateCompact(current date)
+		copy ("CCC cleaned on: " & nowStamp) to end of newFooterLines
+		copy ("Characters removed: " & charsRemoved & " (" & ((round ((charsRemoved / originalLength) * 1000) / 10) & "% reduction)")) to end of newFooterLines
+	end if
+	
+	-- always update last-checked
+	set nowStamp to formatDateCompact(current date)
+	copy ("Last checked: " & nowStamp) to end of newFooterLines
+	
+	-- assemble the footer block
+	set oldDelims to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to return
+	set footerBody to newFooterLines as text
+	set AppleScript's text item delimiters to oldDelims
+	
+	-- ensure exactly one blank line before it, and a trailing LF
+	set footerBlock to return & return & footerBody & return
+	
+	return bodyText & footerBlock
+end updateCCCFooter
+
+-- ==========================================================
+-- GROUP TAG MANAGEMENT (Under development. Plan a session for this)
+-- ==========================================================
+
+on processGroupTags(theContact)
+	-- Validate input
+	if theContact is missing value then
+		utilitiesScript's moduleLogWarning("ContactOperations", "Invalid contact (missing value) passed to processGroupTags")
+		return {success:false, modified:false, reason:"Invalid contact object"}
+	end if
+	
+	utilitiesScript's moduleLogInfo("ContactOperations", "Group tag processing requested for contact")
+	
+	-- Get contact name for better logging
+	try
+		tell application "Contacts"
+			set contactName to name of theContact
+			utilitiesScript's moduleLogDebug("ContactOperations", "Processing group tags for: " & contactName)
+		end tell
+	on error nameErr
+		set contactName to "Unknown"
+		utilitiesScript's moduleLogWarning("ContactOperations", "Could not get contact name: " & nameErr)
+	end try
+	
+	-- This will be implemented in Session 3
+	utilitiesScript's moduleLogInfo("ContactOperations", "Group tag processing feature will be implemented in the next version")
+	
+	-- For now, return success but no modification
+	return {success:true, modified:false, reason:"Group tag processing not yet implemented"}
+end processGroupTags
+
+--===
+-- STATISTICS
+--===
+
+-- Load cumulative optimisation statistics, tolerant to locale commas
+on loadCumulativeStats()
+	set stats to {totalContacts:0, totalChars:0, totalKB:0, avgCharsPerContact:0, percentSaved:0}
+	
+	global scriptFolder
+	set statsFilePath to scriptFolder & "ccc_stats.plist"
+	utilitiesScript's moduleLogDebug("ContactOperations", "Attempting to load stats from: " & statsFilePath)
+	
+	-- silent exit if file missing
+	try
+		tell application "System Events"
+			if not (exists file statsFilePath) then
+				utilitiesScript's moduleLogInfo("ContactOperations", "No stats file found, returning defaults")
+				return stats
+			end if
+		end tell
+	on error e
+		utilitiesScript's moduleLogWarning("ContactOperations", "File check failed: " & e)
+		return stats
+	end try
+	
+	-- read + parse
+	try
+		set fileRef to open for access file statsFilePath
+		set rawText to read fileRef
+		close access fileRef
+		
+		set ASTID to AppleScript's text item delimiters
+		set AppleScript's text item delimiters to return
+		set linesArr to text items of rawText
+		set AppleScript's text item delimiters to ":"
+		
+		repeat with aLine in linesArr
+			if aLine contains ":" then
+				set {keyTxt, valTxt} to text items of aLine
+				-- α20-PATCH ① accept both “99,9” & “99.9”
+				set normVal to utilitiesScript's replaceText(valTxt, ",", ".")
+				try
+					set numVal to normVal as number
+				on error
+					set numVal to 0
+				end try
+				
+				if keyTxt is "totalContacts" then
+					set stats's totalContacts to numVal
+				else if keyTxt is "totalChars" then
+					set stats's totalChars to numVal
+				else if keyTxt is "totalKB" then
+					set stats's totalKB to numVal
+				else if keyTxt is "avgCharsPerContact" then
+					set stats's avgCharsPerContact to numVal
+				else if keyTxt is "percentSaved" then
+					set stats's percentSaved to numVal
+				end if
+			end if
+		end repeat
+		
+		set AppleScript's text item delimiters to ASTID
+		utilitiesScript's moduleLogInfo("ContactOperations", "Loaded stats OK: " & stats's totalContacts & " contacts")
+	on error errMsg
+		utilitiesScript's moduleLogError("ContactOperations", "Failed loading stats: " & errMsg)
+		try
+			close access fileRef
+		end try
+	end try
+	
+	return stats
+end loadCumulativeStats
+
+
+
+-- Statistics persistence with percentSaved support
+--  • Always writes `percentSaved` when it exists in the record.
+on saveCumulativeStats(stats)
+	utilitiesScript's moduleLogInfo("ContactOperations", "Saving cumulative statistics to file(s)")
+	
+	if stats is missing value then
+		utilitiesScript's moduleLogError("ContactOperations", "Cannot save statistics: stats record is missing value")
+		return false
+	end if
+	
+	-- build the plist-style body
+	try
+		set txt to "totalContacts:" & stats's totalContacts & return
+		set txt to txt & "totalChars:" & stats's totalChars & return
+		set txt to txt & "totalKB:" & stats's totalKB & return
+		set txt to txt & "avgCharsPerContact:" & stats's avgCharsPerContact & return
+		if stats contains "percentSaved" then ¬
+			set txt to txt & "percentSaved:" & stats's percentSaved & return
+	on error e
+		utilitiesScript's moduleLogError("ContactOperations", "Error formatting statistics data: " & e)
+		return false
+	end try
+	
+	-- list of targets: session + global
+	global sessionFolder
+	set targetList to {sessionFolder & "ccc_stats.plist", ¬
+		(path to documents folder as string) & "CCC Script:ccc_stats.plist"}
+	
+	set wroteOne to false
+	
+	repeat with fPath in targetList
+		set fPath to fPath as text
+		
+		try
+			-- 1️⃣ guarantee the parent folder exists
+			do shell script "mkdir -p " & quoted form of _parentPosix(fPath)
+			
+			-- 2️⃣ guarantee the file itself exists
+			do shell script "test -f " & quoted form of POSIX path of fPath & " || touch " & quoted form of POSIX path of fPath
+			
+			-- 3️⃣ overwrite with fresh stats
+			set fileRef to open for access file fPath with write permission
+			set eof of fileRef to 0
+			write statsText to fileRef starting at eof
+			close access fileRef
+			
+			utilitiesScript's moduleLogInfo("ContactOperations", "Stats saved to: " & fPath)
+			set wroteOne to true
+			
+		on error errMsg
+			try
+				close access file fPath
+			end try
+			utilitiesScript's moduleLogWarning("ContactOperations", "Failed to write " & fPath & ": " & errMsg)
+		end try
+	end repeat
+	
+	return wroteOne
+end saveCumulativeStats
+
+-- Update cumulative statistics with non-blocking error handling
+on updateCumulativeStats(charsRemoved)
+	-- Guard against any issues
+	try
+		utilitiesScript's moduleLogInfo("ContactOperations", "Updating cumulative stats with " & charsRemoved & " chars removed")
+		
+		-- Load current stats
+		set stats to {totalContacts:0, totalChars:0, totalKB:0, avgCharsPerContact:0}
+		try
+			utilitiesScript's moduleLogDebug("ContactOperations", "Loading existing statistics")
+			set stats to my loadCumulativeStats()
+		on error loadErr
+			utilitiesScript's moduleLogWarning("ContactOperations", "Error loading stats (using defaults): " & loadErr)
+			-- Continue with default stats
+		end try
+		
+		-- Update stats
+		set originalTotalChars to stats's totalChars
+		set originalTotalContacts to stats's totalContacts
+		
+		utilitiesScript's moduleLogDebug("ContactOperations", "Current stats before update: " & originalTotalContacts & " contacts, " & originalTotalChars & " chars saved")
+		
+		-- Increment values
+		set stats's totalContacts to (stats's totalContacts) + 1
+		set stats's totalChars to (stats's totalChars) + charsRemoved
+		set stats's totalKB to (stats's totalChars) / 1024
+		
+		utilitiesScript's moduleLogDebug("ContactOperations", "Updated totals: " & stats's totalContacts & " contacts, " & stats's totalChars & " chars saved")
+		
+		-- Calculate new average
+		if stats's totalContacts > 0 then
+			set stats's avgCharsPerContact to (stats's totalChars) / (stats's totalContacts)
+			utilitiesScript's moduleLogDebug("ContactOperations", "New average: " & stats's avgCharsPerContact & " chars per contact")
+		else
+			set stats's avgCharsPerContact to 0
+			utilitiesScript's moduleLogDebug("ContactOperations", "No contacts processed yet, average set to 0")
+		end if
+		
+		-- Save updated stats with error handling
+		try
+			utilitiesScript's moduleLogDebug("ContactOperations", "Saving updated statistics")
+			set saveResult to my saveCumulativeStats(stats)
+			
+			if saveResult then
+				utilitiesScript's moduleLogInfo("ContactOperations", "Successfully updated cumulative stats")
+				return true
+			else
+				utilitiesScript's moduleLogWarning("ContactOperations", "Save operation returned false")
+				return false
+			end if
+		on error saveErr
+			utilitiesScript's moduleLogError("ContactOperations", "Error saving cumulative stats: " & saveErr)
+			return false
+		end try
+	on error updateErr
+		-- Log but continue - don't let stats failure affect main functionality
+		utilitiesScript's moduleLogError("ContactOperations", "Error in cumulative stats update (non-critical): " & updateErr)
+		return false
+	end try
+end updateCumulativeStats
+
+-- Full statistics rebuild from all contacts
+on rebuildCumulativeStats()
+	utilitiesScript's moduleLogInfo("ContactOperations", "Starting to rebuild cumulative statistics from contact scan")
+	
+	-- base result record
+	set statsRec to {totalContacts:0, totalChars:0, totalKB:0, avgCharsPerContact:0, totalOriginalChars:0, percentSaved:0} ¬
+		
+	
+	-- get every contact
+	set theContacts to people of application "Contacts"
+	set totalCnt to count of theContacts
+	
+	utilitiesScript's moduleLogInfo("ContactOperations", "Scanning " & totalCnt & " contacts for CCC footers")
+	
+	set scanned to 0
+	repeat with aPerson in theContacts
+		set scanned to scanned + 1
+		
+		try
+			-- must query the property in Contacts’ context
+			tell application "Contacts"
+				set noteTxt to (note of aPerson) as text
+			end tell
+		on error
+			set noteTxt to ""
+		end try
+		
+		if noteTxt contains "==== CCC Summary ====" then
+			-- try to find the "Characters removed: X (KB, %)"
+			set footerStart to (offset of "==== CCC Summary ====" in noteTxt)
+			set footerTxt to text footerStart thru -1 of noteTxt
+			
+			set removedChars to 0
+			set percentVal to 0
+			
+			if footerTxt contains "Characters removed:" then
+				set lineStart to (offset of "Characters removed:" in footerTxt) + 19
+				set lineEnd to (offset of return in (text lineStart thru -1 of footerTxt)) + lineStart - 2
+				set infoLine to text lineStart thru lineEnd of footerTxt
+				
+				-- split “452 (0,44 KB, 36,0% reduction)”
+				set ASTID to AppleScript's text item delimiters
+				-- set AppleScript's text item delimiters to {"(", ")", ", ",", "%"}
+				set AppleScript's text item delimiters to {"(", ")", " ", ",", "%"}
+				
+				
+				set pieces to text items of infoLine
+				set AppleScript's text item delimiters to ASTID
+				
+				try
+					set removedChars to utilitiesScript's parseLocaleNumber(item 1 of pieces)
+				end try
+				try
+					-- percent is *last* number in the original French/EN patterns
+					set percentVal to utilitiesScript's parseLocaleNumber(item -2 of pieces)
+				end try
+			end if
+			
+			-- update statistics
+			if removedChars > 0 then
+				set statsRec's totalContacts to (statsRec's totalContacts) + 1
+				set statsRec's totalChars to (statsRec's totalChars) + removedChars
+				if percentVal > 0 then
+					set origChars to (removedChars * 100.0) / percentVal
+					set statsRec's totalOriginalChars to (statsRec's totalOriginalChars) + origChars
+				end if
+			end if
+		end if
+		
+		-- progress log every 300 contacts
+		if scanned mod 300 = 0 then
+			set pct to round ((scanned / totalCnt) * 100)
+			utilitiesScript's moduleLogInfo("ContactOperations", "Scanned " & scanned & " of " & totalCnt & " contacts (" & pct & "%)")
+		end if
+	end repeat
+	
+	-- finish metrics
+	if (statsRec's totalContacts) > 0 then
+		set statsRec's avgCharsPerContact to (statsRec's totalChars) / (statsRec's totalContacts)
+	end if
+	
+	if (statsRec's totalOriginalChars) > 0 then
+		set statsRec's percentSaved to ((statsRec's totalChars) / (statsRec's totalOriginalChars)) * 100
+	end if
+	
+	-- size in KB
+	set statsRec's totalKB to (statsRec's totalChars) / 1024
+	
+	utilitiesScript's moduleLogInfo("ContactOperations", "Rebuild complete: " & (statsRec's totalContacts) & ¬
+		" footered contacts, " & (statsRec's totalChars) & " chars saved (" & ¬
+		(statsRec's percentSaved as string) & "%)")
+	
+	-- ask Utilities to persist
+	if my saveCumulativeStats(statsRec) then
+		utilitiesScript's moduleLogInfo("ContactOperations", "Rebuilt statistics saved successfully")
+	else
+		utilitiesScript's moduleLogError("ContactOperations", "❌ FAILED to save rebuilt statistics!")
+	end if
+	
+	return statsRec
+end rebuildCumulativeStats
+
+-- Generate formatted statistics report with error handling
+on getCumulativeStatsReport()
+	utilitiesScript's moduleLogInfo("ContactOperations", "Generating cumulative statistics report")
+	
+	-- Load current stats with error handling
+	try
+		utilitiesScript's moduleLogDebug("ContactOperations", "Loading current statistics")
+		set stats to my loadCumulativeStats()
+		
+		-- Format KB and average for display
+		set kbFormatted to (round ((stats's totalChars) / 1024 * 100)) / 100
+		set avgFormatted to (round ((stats's avgCharsPerContact) * 10)) / 10
+		
+		utilitiesScript's moduleLogDebug("ContactOperations", "Formatted values: " & kbFormatted & " KB, " & avgFormatted & " avg chars")
+		
+		-- Create the report
+		set reportText to "📊 Cumulative Statistics:" & return & return
+		set reportText to reportText & "• Total contacts optimized: " & stats's totalContacts & return
+		set reportText to reportText & "• Total characters saved: " & stats's totalChars & " (" & kbFormatted & " KB)" & return
+		set reportText to reportText & "• Average savings: " & avgFormatted & " characters per contact"
+		
+		-- Add percentage saved information if available
+		if stats contains "percentSaved" and stats's percentSaved > 0 then
+			set percentFormatted to (round ((stats's percentSaved) * 10)) / 10
+			set reportText to reportText & return & "• Percentage of text saved: " & percentFormatted & "%"
+			utilitiesScript's moduleLogDebug("ContactOperations", "Added percentage saved: " & percentFormatted & "%")
+		else
+			utilitiesScript's moduleLogDebug("ContactOperations", "No percentage saved data available")
+		end if
+		
+		utilitiesScript's moduleLogInfo("ContactOperations", "Statistics report generated successfully")
+		return reportText
+	on error errMsg
+		utilitiesScript's moduleLogError("ContactOperations", "Error generating statistics report: " & errMsg)
+		
+		-- Create a fallback report indicating the error
+		set fallbackReport to "📊 Cumulative Statistics:" & return & return
+		set fallbackReport to fallbackReport & "• Error loading statistics: " & errMsg & return
+		set fallbackReport to fallbackReport & "• Try rebuilding statistics from the Statistics Management menu"
+		
+		return fallbackReport
+	end try
+end getCumulativeStatsReport
+
+-- Track processed contacts to prevent double-counting in statistics
+on hasBeenProcessedInSession(contactName)
+	-- Access the global list with error protection
+	try
+		global processedContactsList
+		
+		-- Validate input
+		if contactName is "" or contactName is missing value then
+			utilitiesScript's moduleLogWarning("ContactOperations", "Invalid contact name passed to hasBeenProcessedInSession")
+			return false
+		end if
+		
+		utilitiesScript's moduleLogDebug("ContactOperations", "Checking if contact has been processed: " & contactName)
+		
+		-- Defensive initialization if somehow still undefined
+		if processedContactsList is missing value then
+			set processedContactsList to {}
+			utilitiesScript's moduleLogWarning("ContactOperations", "processedContactsList was undefined - re-initialized")
+		end if
+		
+		-- Check if contact is in the list
+		set contactFound to false
+		repeat with processedContact in processedContactsList
+			if processedContact is contactName then
+				utilitiesScript's moduleLogDebug("ContactOperations", "Contact already processed in this session: " & contactName)
+				set contactFound to true
+				exit repeat
+			end if
+		end repeat
+		
+		-- If not found, add to the list
+		if not contactFound then
+			try
+				set end of processedContactsList to contactName
+				utilitiesScript's moduleLogDebug("ContactOperations", "Added " & contactName & " to processedContactsList")
+			on error addErr
+				utilitiesScript's moduleLogError("ContactOperations", "Error adding contact to processedContactsList: " & addErr)
+			end try
+			return false
+		end if
+		
+		-- If found, return true
+		return true
+		
+	on error processErr
+		-- Failsafe: if anything goes wrong, assume contact wasn't processed
+		utilitiesScript's moduleLogError("ContactOperations", "Error in hasBeenProcessedInSession: " & processErr)
+		return false
+	end try
+end hasBeenProcessedInSession
+
+-- ====
+-- GENERIC HELPERS
+-- ====
+
+-------------------------------------------------------------------------------
+--  formatDateCompact(theDate)                    ▸  PRIVATE
+--  Returns "YYYY‑MM‑DD HH:MM:SS" (zero‑padded).
+--  AppleScript 2.4‑compatible and side‑effect‑free.
+-------------------------------------------------------------------------------
+on formatDateCompact(theDate)
+	if theDate is missing value then set theDate to (current date)
+	
+	set y to year of theDate as integer
+	set m to (month of theDate as integer)
+	set d to day of theDate
+	set hh to hours of theDate
+	set mm to minutes of theDate -- ✅ fixed: minutes, not “min”
+	set ss to seconds of theDate
+	
+	repeat with n in {m, d, hh, mm, ss}
+		if (n as integer) < 10 then set contents of n to "0" & n
+	end repeat
+	
+	return (y & "-" & m & "-" & d & " " & hh & ":" & mm & ":" & ss) as text
+end formatDateCompact
+
+-- ===================================================
+--  generateSkipReport(skippedContacts) → text
+--
+--  When no contacts needed cleaning, builds a short report listing each
+--  skipped contact and the date they were last checked (from their CCC footer).
+-- ===================================================
+on generateSkipReport(skippedContacts)
+	set reportLines to {"No contacts needed cleaning."}
+	repeat with c in skippedContacts
+		-- safely get note text
+		tell application "Contacts"
+			try
+				set noteText to note of c
+			on error
+				set noteText to ""
+			end try
+			set contactName to name of c
+		end tell
+		
+		-- extract and parse last-checked date
+		set footer to extractExistingFooter(noteText)
+		set lastChecked to parseFooterLine(footer, "Last checked:")
+		if lastChecked is "" then set lastChecked to "(no check date found)"
+		
+		copy ("• " & contactName & " was last checked on " & lastChecked) to end of reportLines
+	end repeat
+	
+	return reportLines as text
+end generateSkipReport
+
+-- ==========================================================
+-- MODULE INFORMATION
+-- Provide diagnostic information about the module
+on getModuleInfo()
+	utilitiesScript's moduleLogDebug("ContactOperations", "Retrieving module information")
+	
+	-- Access needed global variables
+	global MODULE_NAME, scriptVersion
+	
+	-- Make sure MODULE_NAME is defined
+	if MODULE_NAME is missing value then
+		set MODULE_NAME to "ContactOperations"
+		utilitiesScript's moduleLogWarning("ContactOperations", "MODULE_NAME was missing value, using default")
+	end if
+	
+	set functionCount to 26 -- Updated after removing deprecated functions
+	
+	-- Create and return module info record
+	set moduleInfo to {name:MODULE_NAME, version:scriptVersion, functions:functionCount}
+	
+	utilitiesScript's moduleLogInfo("ContactOperations", "Module information: " & MODULE_NAME & " v" & scriptVersion & " (" & functionCount & " functions)")
+	return moduleInfo
+end getModuleInfo
+
+-- Updated on June 4th to factor in the latest developments
+-- Initialize and run tests when script is launched directly
+on run
+	utilitiesScript's moduleLogInfo("ContactOperations", "===== CONTACT OPERATIONS MODULE: DIRECT EXECUTION =====")
+	
+	-- Initialize the module
+	initializeModule()
+	utilitiesScript's moduleLogInfo("ContactOperations", "ContactOperations module (v" & scriptVersion & ") initialized")
+	
+	-- Basic self-test when run directly
+	utilitiesScript's moduleLogInfo("ContactOperations", "Running V2 pipeline component tests...")
+	
+	-- Test text with intentional duplications for validation
+	set testText to "ExperienceExperience at Company XYZ" & linefeed & ¬
+		"Test line" & linefeed & ¬
+		"Test line" & linefeed & ¬
+		"EducationEducation" & linefeed & linefeed & ¬
+		"Paragraph 1" & linefeed & ¬
+		"With multiple lines" & linefeed & linefeed & ¬
+		"Paragraph 1" & linefeed & ¬
+		"With multiple lines" & linefeed & ¬
+		"Some content ending with ...see more" & linefeed & ¬
+		"CompanyCompany logo"
+	
+	-- Reset counters for testing
+	global inlineDuplicatesCount, lineDuplicatesCount, blockDuplicatesCount
+	set inlineDuplicatesCount to 0
+	set lineDuplicatesCount to 0
+	set blockDuplicatesCount to 0
+	
+	-- Test the actual V2 pipeline components
+	utilitiesScript's moduleLogInfo("ContactOperations", "Testing V2 pipeline with text of length " & (length of testText))
+	
+	-- Test the main V2 processing function
+	try
+		set processedText to processNoteContentV2(testText)
+		
+		-- Report results
+		set originalLength to length of testText
+		set processedLength to length of processedText
+		set removedChars to originalLength - processedLength
+		
+		utilitiesScript's moduleLogInfo("ContactOperations", "V2 Pipeline Test Results:")
+		utilitiesScript's moduleLogInfo("ContactOperations", "  Original length: " & originalLength)
+		utilitiesScript's moduleLogInfo("ContactOperations", "  Processed length: " & processedLength)
+		utilitiesScript's moduleLogInfo("ContactOperations", "  Characters removed: " & removedChars)
+		
+		-- Test individual V2 components
+		utilitiesScript's moduleLogInfo("ContactOperations", "Testing individual V2 components...")
+		
+		-- Test line normalization
+		set testLine to "ExperienceExperience at CompanyCompany logo"
+		set normalizedLine to normalizeContactLineV2(testLine)
+		utilitiesScript's moduleLogInfo("ContactOperations", "  Line normalization: '" & testLine & "' → '" & normalizedLine & "'")
+		
+		-- Test consecutive line deduplication
+		set dupLines to "Same line" & return & "Same line" & return & "Different line"
+		set dedupedLines to deduplicateConsecutiveLinesV2(dupLines)
+		utilitiesScript's moduleLogInfo("ContactOperations", "  Line dedup: " & (length of dupLines) & " → " & (length of dedupedLines) & " chars")
+		
+		-- Test trimming
+		set messyText to return & return & "Clean content" & return & return
+		set trimmedText to trimLeadingTrailingBlankLines(messyText)
+		utilitiesScript's moduleLogInfo("ContactOperations", "  Trim test: " & (length of messyText) & " → " & (length of trimmedText) & " chars")
+		
+	on error testErr
+		utilitiesScript's moduleLogError("ContactOperations", "V2 pipeline test failed: " & testErr)
+	end try
+	
+	-- Test CCC footer generation
+	utilitiesScript's moduleLogInfo("ContactOperations", "Testing CCC footer generation...")
+	try
+		set testFooter to updateCCCFooter("Sample contact note", 25, 100, true)
+		utilitiesScript's moduleLogInfo("ContactOperations", "Generated test footer with " & (length of testFooter) & " characters")
+	on error footerErr
+		utilitiesScript's moduleLogError("ContactOperations", "Footer test failed: " & footerErr)
+	end try
+	
+	-- Test statistics functions
+	utilitiesScript's moduleLogInfo("ContactOperations", "Testing statistics functions...")
+	try
+		set statsReport to getCumulativeStatsReport()
+		utilitiesScript's moduleLogInfo("ContactOperations", "Generated stats report with " & (length of statsReport) & " characters")
+	on error statsErr
+		utilitiesScript's moduleLogError("ContactOperations", "Stats test failed: " & statsErr)
+	end try
+	
+	-- Return module info
+	set moduleInfo to getModuleInfo()
+	set resultMessage to "ContactOperations module (v" & moduleInfo's version & ") tested successfully with " & moduleInfo's functions & " functions."
+	
+	utilitiesScript's moduleLogInfo("ContactOperations", "V2 pipeline test execution completed successfully")
+	utilitiesScript's moduleLogInfo("ContactOperations", resultMessage)
+	
+	return resultMessage
+end run

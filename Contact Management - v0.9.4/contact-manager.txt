@@ -1,0 +1,2739 @@
+-- ==============================================
+-- MODULE: ContactManager
+--  VERSION: 0.9.6-alpha (2025-06-04)
+-- ==============================================
+-- Copyright: ©Philippe Dewost 2025
+-- Main orchestrator for the CCC Contact Cleaner system.
+--
+-- ==============================================
+-- CHANGELOG
+-- ==============================================
+-- 0.9.6-alpha  (2025-06-04)
+--	• Started decommissionning v1 pipeline
+--   0.9.4-alpha (2025-05-24):
+--     • Header audit, pipeline orchestration mapping, no functional changes.
+--     • Confirmed UI/pipeline branching, validated session management calls.
+--   0.9.0-alpha4 (2025-05-21): 
+--     • Pipeline debug and propagation tested, all upstream handlers robust.
+--     • Integration with robust Utilities and Contact Operations modules.
+--      0.9.0-alpha3 (2025-05-21)
+--          * Session/backup folder names now use zero-padded timestamps (no seconds)
+--          * All file/report/backup exports unified through Utilities (no seconds in any filenames)
+--          * Logging, error handling, and backup coordination robust and standardized
+--          * Parameter passing fixed for all report/backup handlers (no -1721 errors)
+--      0.9.0-alpha2 (2025-05-20)
+--          * v2 pipeline integration, statistics export, and session reporting
+--          * Unified Utilities script for file/folder/backup/manifest actions
+--      0.9.0-alpha1 (2025-05-18)
+-- * Added support for unified contact processing architecture
+-- * Updated pipeline toggle system to support refactored code
+-- * Enhanced pipeline comparison functions
+-- * Improved logs for better debugging and pipeline isolation
+--
+-- ==============================================
+--  FEATURE REQUESTS / NEXT STEPS
+-- ==============================================
+--   * Reorganize code around human / AI readable blocks without changing anything
+--    * Remove references to the v1 v2 pipeline selection
+--      * Menu/UX redesign to flat, list-based selection (no nested dialog traps)
+--      * Investigate/fix block deduplication warning
+--      * QA: simulated/real contact runs, result report, finalize test coverage
+--
+-- ==============================================
+-- TARGET IDEAS / GRAND SCHEME OF THINGS
+-- ==============================================
+-- * Groups as Finder tags in exported vCards
+-- * Automatic security tagging based on note contents
+-- * Remove hard-coded debugMode/testMode defaults before release
+-- * Finish CLI automation entry-point parity with UX flow
+-- * Add dialog window titles when they are missing and remove them from dialog text
+-- * Improve error visualization for contact modification failures
+-- * restructure the script in human readable blocks
+--
+-- ==============================================
+-- KNOWN ISSUES
+-- ==============================================
+--      * Menu navigation to be simplified in next session
+--
+-- ==============================================
+-- CORE HANDLERS & STATUS
+-- ==============================================
+-- run() - Main entry point
+-- initializeSystem() - Sets up the environment
+-- setPipelineVersion() - Controls which processing pipeline to use
+-- showMainMenu() - Displays main menu interface
+-- handleContactCleaning() - Launches note deduplication workflow
+
+(*
+Proposed Functional Regrouping for ContactManager:
+
+Block 1: Module Core & Configuration
+applescript-- ===== SYSTEM CORE & PROPERTIES =====
+-- Essential module setup, version management, and configuration
+
+-- Version Management System
+property SYSTEM_VERSION : "0.9.0-alpha4"
+property SYSTEM_RELEASE_DATE : "May 21, 2025"
+property SYSTEM_VERSION_NAME : "Contact Management System"
+-- [other properties...]
+
+-- Version Management Handlers
+- parseVersionComponents()
+- getFormattedVersion()
+- getVersionForDisplay()
+- getVersionReport()
+
+-- Core Configuration
+- getFilenameFromPath(fullPath)
+- setPipelineVersion(versionChoice)
+- toggleSimulationMode()
+
+
+Block 2: Logging System Interface
+applescript-- ===== LOGGING FACADE =====
+-- Unified logging interface for the entire application
+
+-- Logging Facade (delegates to Utilities)
+- cmLogError(msg)
+- cmLogWarning(msg)
+- cmLogInfo(msg)
+- cmLogDebug(msg)
+
+-- Logging System Control
+- synchronizeLogSettings()
+
+
+Block 3: System Lifecycle Management
+applescript-- ===== SYSTEM INITIALIZATION & LIFECYCLE =====
+-- Application startup, shutdown, and resource management
+
+-- Initialization Chain
+- initializeSystem()
+- createSessionFolders()
+- loadModules()
+
+-- System Control
+- signalScriptExit()
+- run() -- Main entry point
+
+
+Block 4: Core User Interface Flow
+applescript-- ===== MAIN USER INTERFACE =====
+-- Primary user interaction and workflow orchestration
+
+-- Main UI Flow
+- showWelcomeWithPipelineChoice()
+- showMainMenu()
+
+-- Primary Feature Handlers
+- handleContactCleaning()
+- handleGroupManagement()
+- handleToolsAndSettings()
+
+
+Block 5: Tools & Configuration Menus
+applescript-- ===== TOOLS & SETTINGS INTERFACE =====
+-- Configuration, debugging, and system management
+
+-- Settings & Configuration
+- handleSystemSettings()
+- handleLoggingOptions()
+
+-- Analysis & Comparison Tools
+- handleStatisticsManagement()
+
+
+Block 6: Backup & Recovery System
+applescript-- ===== BACKUP & RECOVERY INTERFACE =====
+-- Data backup, restoration, and version management
+
+-- Backup Menu System
+- handleBackupOperations()
+- handleScriptBackups()
+- handleContactBackups()
+
+-- Backup Operations
+- backupContact()
+- restoreContact()
+
+
+Detailed Rationale for Regrouping:
+1. Module Core & Configuration (Block 1)
+Purpose: Centralizes all system-wide configuration and version management
+Benefits:
+
+Easy to find version information
+Configuration changes in one place
+Clear separation of constants from logic
+
+2. Logging System Interface (Block 2)
+Purpose: Provides clean logging facade for entire application
+Benefits:
+
+Single point for logging policy changes
+Easy to replace logging implementation
+Clear separation from business logic
+
+3. System Lifecycle Management (Block 3)
+Purpose: Manages application startup/shutdown sequence
+Benefits:
+
+Clear initialization order
+Easy to debug startup issues
+Single point for system state management
+
+4. Core User Interface Flow (Block 4)
+Purpose: Main user interaction pathways
+Benefits:
+
+Clear user flow understanding
+Easy to modify main workflows
+Separation of primary vs. secondary features
+
+5. Tools & Configuration Menus (Block 5)
+Purpose: Advanced features and system configuration
+Benefits:
+
+Groups related administrative functions
+Separates power-user features from basic workflow
+Easy to extend with new tools
+
+6. Backup & Recovery System (Block 6)
+Purpose: Data protection and recovery operations
+Benefits:
+
+Groups related data safety functions
+Clear separation of backup logic
+Easy to enhance backup capabilities
+
+Additional Organizational Improvements:
+Handler Documentation Standard:
+applescript-- =============================================================================
+-- Handler: handlerName
+-- VERSION: 0.9.0-alpha4 (2025-05-27)
+-- PURPOSE: Clear description of what this handler does
+-- INPUTS:  parameter descriptions
+-- RETURNS: return value description
+-- NOTES:   Any special considerations
+-- =============================================================================
+Dependency Mapping:
+Each block should document its dependencies:
+applescript-- DEPENDENCIES:
+-- - Utilities: safeLog(), createFolderPath(), formatTimestamp()
+-- - ContactOperations: processContactsWithScope(), setLogLevel()
+Public API Declaration:
+applescript-- ===== PUBLIC API =====
+-- These handlers may be called by external scripts:
+-- - run()
+-- - initializeSystem()
+-- - setPipelineVersion()
+
+-- ===== INTERNAL API =====
+-- These handlers are for internal use only:
+-- - handleContactCleaning()
+-- - synchronizeLogSettings()
+*)
+
+use AppleScript version "2.4"
+use framework "Foundation"
+use scripting additions
+
+-- ==============================================
+-- SCRIPT CONFIGURATION
+-- ==============================================
+
+property scriptName : "Contact Management System"
+property scriptVersion : "" -- will receive SYSTEM_VERSION at runtime
+property scriptTitle : "" -- set once in initializeSystem / fallback in UI
+
+-- Reference to other modules
+property utilitiesScript : missing value
+property contactOpsScript : missing value
+
+-- Global configuration
+
+-- FOR ADVANCED USERS ONLY : debugMode and testMode can be safely switched to true or false
+property defaultDebugMode : true -- Enable for verbose logging
+property defaultTestMode : true -- Enable for simulation mode
+-- Refactoring property
+property defaultPipelineVersion : "v2" -- Default to original pipeline until v2 is proven
+property currentPipelineVersion : "" -- Will be set at runtime based on user choice
+-- FOR ADVANCED USERS
+
+-- Live flags that are reset on each run
+property debugMode : missing value
+property testMode : missing value
+
+property shouldExitScript : false -- for UX exit mechanism
+
+-- Global paths as properties rather than global variables with assignments
+property scriptFolder : ""
+property backupFolder : ""
+property logsFolder : ""
+property reportsFolder : ""
+
+-- ==============================================
+-- VERSION MANAGEMENT SYSTEM 
+-- ==============================================
+-- PURPOSE: Single source of truth for version information
+
+-- VERSION DEFINITION - CHANGE ONLY HERE
+property SYSTEM_VERSION : "0.9.0-alpha4" -- Main system version
+property SYSTEM_RELEASE_DATE : "May 21, 2025" -- Release date
+property SYSTEM_VERSION_NAME : "Contact Management System" -- System name
+
+-- Additional version components - automatically derived
+property SYSTEM_VERSION_MAJOR : "0" -- Major version (auto-derived)
+property SYSTEM_VERSION_MINOR : "9" -- Minor version (auto-derived)
+property SYSTEM_VERSION_PATCH : "0" -- Patch version (auto-derived)
+property SYSTEM_VERSION_STAGE : "alpha" -- Stage (auto-derived)
+property SYSTEM_VERSION_BUILD : "4" -- Build number (auto-derived)
+
+-- Unified logging system : see Utilities
+property kLogLevelError : 0
+property kLogLevelInfo : 1
+property kLogLevelDebug : 2
+property kLogLevelWarn : 1 -- visual warning piggy-backs on INFO
+
+on cmLogError(msg)
+	if utilitiesScript is missing value then
+		log "[ContactManager] ERROR: " & msg
+	else
+		utilitiesScript's safeLog("ContactManager", msg, kLogLevelError)
+	end if
+end cmLogError
+
+on cmLogWarning(msg)
+	if utilitiesScript is missing value then
+		log "[ContactManager] WARNING: " & msg
+	else
+		utilitiesScript's safeLog("ContactManager", "⚠️ WARNING: " & msg, kLogLevelWarn)
+	end if
+end cmLogWarning
+
+on cmLogInfo(msg)
+	if utilitiesScript is missing value then
+		log "[ContactManager] INFO: " & msg
+	else
+		utilitiesScript's safeLog("ContactManager", msg, kLogLevelInfo)
+	end if
+end cmLogInfo
+
+on cmLogDebug(msg)
+	if utilitiesScript is missing value then
+		log "[ContactManager] DEBUG: " & msg
+	else
+		utilitiesScript's safeLog("ContactManager", msg, kLogLevelDebug)
+	end if
+end cmLogDebug
+
+-- Parse version components on script load
+on parseVersionComponents()
+	-- Extract major.minor.patch
+	set ASTID to AppleScript's text item delimiters
+	
+	-- Parse major.minor.patch
+	set AppleScript's text item delimiters to "."
+	try
+		set versionParts to text items of SYSTEM_VERSION
+		if (count of versionParts) ≥ 1 then
+			set SYSTEM_VERSION_MAJOR to item 1 of versionParts
+		end if
+		if (count of versionParts) ≥ 2 then
+			set SYSTEM_VERSION_MINOR to item 2 of versionParts
+		end if
+		if (count of versionParts) ≥ 3 then
+			-- The third part might have a suffix like "-alpha2"
+			set patchPart to item 3 of versionParts
+			
+			-- Extract the patch number and stage/build if present
+			if patchPart contains "-" then
+				set AppleScript's text item delimiters to "-"
+				set patchItems to text items of patchPart
+				if (count of patchItems) ≥ 1 then
+					set SYSTEM_VERSION_PATCH to item 1 of patchItems
+				end if
+				if (count of patchItems) ≥ 2 then
+					set stageBuild to item 2 of patchItems
+					
+					-- Split stage and build number if applicable
+					set stageLen to 0
+					repeat with i from 1 to length of stageBuild
+						set charItem to character i of stageBuild
+						if charItem ≥ "0" and charItem ≤ "9" then
+							exit repeat
+						end if
+						set stageLen to stageLen + 1
+					end repeat
+					
+					if stageLen > 0 then
+						set SYSTEM_VERSION_STAGE to text 1 thru stageLen of stageBuild
+						if stageLen < length of stageBuild then
+							set SYSTEM_VERSION_BUILD to text (stageLen + 1) thru -1 of stageBuild
+						end if
+					end if
+				end if
+			else
+				set SYSTEM_VERSION_PATCH to patchPart
+				set SYSTEM_VERSION_STAGE to ""
+				set SYSTEM_VERSION_BUILD to ""
+			end if
+		end if
+	on error parseErr
+		cmLogError("Error parsing version components: " & parseErr)
+	end try
+	
+	-- Restore text item delimiters
+	set AppleScript's text item delimiters to ASTID
+end parseVersionComponents
+
+-- Build a formatted version string with extra information
+on getFormattedVersion()
+	set formattedVersion to SYSTEM_VERSION
+	
+	if SYSTEM_VERSION_STAGE is not "" then
+		set formattedVersion to formattedVersion & " (" & SYSTEM_VERSION_STAGE
+		if SYSTEM_VERSION_BUILD is not "" then
+			set formattedVersion to formattedVersion & " build " & SYSTEM_VERSION_BUILD
+		end if
+		set formattedVersion to formattedVersion & ")"
+	end if
+	
+	set formattedVersion to formattedVersion & " - " & SYSTEM_RELEASE_DATE
+	
+	return formattedVersion
+end getFormattedVersion
+
+-- Get a short version display suitable for dialogs
+on getVersionForDisplay()
+	return "v" & SYSTEM_VERSION
+end getVersionForDisplay
+
+-- Get a detailed version report with all components and cumulative statistics
+on getVersionReport()
+	set reportText to SYSTEM_VERSION_NAME & " - Version Information" & return & return
+	set reportText to reportText & "Version: " & SYSTEM_VERSION & return
+	set reportText to reportText & "Released: " & SYSTEM_RELEASE_DATE & return & return
+	
+	set reportText to reportText & "Components:" & return
+	set reportText to reportText & "• Major: " & SYSTEM_VERSION_MAJOR & return
+	set reportText to reportText & "• Minor: " & SYSTEM_VERSION_MINOR & return
+	set reportText to reportText & "• Patch: " & SYSTEM_VERSION_PATCH & return
+	
+	if SYSTEM_VERSION_STAGE is not "" then
+		set reportText to reportText & "• Stage: " & SYSTEM_VERSION_STAGE & return
+		if SYSTEM_VERSION_BUILD is not "" then
+			set reportText to reportText & "• Build: " & SYSTEM_VERSION_BUILD & return
+		end if
+	end if
+	
+	-- ENHANCEMENT: Add cumulative statistics to version info
+	set reportText to reportText & return
+	if contactOpsScript is not missing value then
+		try
+			set statsReport to contactOpsScript's getCumulativeStatsReport()
+			set reportText to reportText & statsReport
+		on error statsErr
+			cmLogError(log "Error getting cumulative stats: " & statsErr)
+			set reportText to reportText & "Cumulative statistics unavailable."
+		end try
+	else
+		set reportText to reportText & "Cumulative statistics unavailable - Contact Operations module not loaded."
+	end if
+	
+	return reportText
+end getVersionReport
+
+
+-- ==============================================
+-- INITIALIZATION
+-- ==============================================
+
+-- Extract filename from a full path (simple version)
+on getFilenameFromPath(fullPath)
+	-- Find the last colon in the path
+	set lastColonPos to 0
+	repeat with i from (length of fullPath) to 1 by -1
+		if character i of fullPath is ":" then
+			set lastColonPos to i
+			exit repeat
+		end if
+	end repeat
+	
+	-- Extract the filename part
+	if lastColonPos > 0 then
+		return text (lastColonPos + 1) thru -1 of fullPath
+	else
+		-- Fallback if no colon found
+		return fullPath
+	end if
+end getFilenameFromPath
+
+-- Initialize script environment with filename-based identification
+on initializeSystem()
+	log "Starting Contact Management System (v" & SYSTEM_VERSION & ")"
+	-- Synchronize debugMode property to global at session start
+	set debugMode to defaultDebugMode
+	if utilitiesScript is not missing value then
+		utilitiesScript's setDebugMode(debugMode)
+	end if
+	set scriptVersion to "v" & SYSTEM_VERSION
+	set scriptTitle to scriptName & " (" & scriptVersion & ")"
+	-- Get the script's actual filename for identification
+	set myPath to path to me as string
+	set myFilename to my getFilenameFromPath(myPath)
+	-- Remove .scpt extension if present
+	if myFilename ends with ".scpt" then
+		set myFilename to text 1 thru ((length of myFilename) - 5) of myFilename
+	end if
+	
+	-- Update the scriptName property (why ???)
+	-- set scriptName to myFilename
+	log "Script file ientified as: " & myFilename
+	
+	-- Create session folders FIRST before any other initialization
+	createSessionFolders()
+	
+	-- Then load modules
+	if not loadModules() then
+		display dialog "Failed to load required modules." buttons {"Exit"} default button "Exit" with icon stop
+		return "Initialization failed. Please check the log for details."
+	end if
+	
+	try
+		if utilitiesScript is not missing value then
+			log "Initializing logging system..."
+			utilitiesScript's initializeLogging()
+			utilitiesScript's processLogQueue() -- optional: flush anything queued
+			log "Logging system initialized"
+		else
+			log "Unable to initialize logging - utilities module not available"
+		end if
+	on error logInitErr
+		-- fall-back to console in case of catastrophic failure
+		cmLogError("ERROR: failed to initialise logging: " & logInitErr)
+	end try
+	
+	if utilitiesScript is not missing value then
+		cmLogInfo("Synchronizing log settings")
+	else
+		log "3. Synchronizing log settings"
+	end if
+	synchronizeLogSettings()
+	
+	-- Now set session paths for each module
+	if utilitiesScript is not missing value then
+		cmLogInfo("Ensuring modules have correct session paths")
+	else
+		log "4. Ensuring modules have correct session paths"
+	end if
+	global scriptFolder, backupFolder, logsFolder, reportsFolder
+	
+	-- Double-check that these are still valid
+	if scriptFolder is "" or scriptFolder is missing value then
+		if utilitiesScript is not missing value then
+			cmLogError("WARNING: scriptFolder is empty after module loading")
+		else
+			cmLogWarning("scriptFolder is empty after module loading")
+		end if
+	end if
+	
+	-- Make sure the module references are valid before using them
+	if utilitiesScript is missing value then
+		cmLogError("⚠️ ERROR: utilitiesScript is missing value")
+	else
+		if utilitiesScript is not missing value then
+			cmLogInfo("utilitiesScript is properly defined")
+		else
+			log "✅ utilitiesScript is properly defined"
+		end if
+		
+		-- Only try to set paths if the module is available
+		try
+			utilitiesScript's setSessionPaths(scriptFolder, backupFolder, logsFolder, reportsFolder)
+			cmLogInfo("Set session paths in Utilities module")
+		on error pathErr
+			cmLogError("Error setting paths in Utilities: " & pathErr)
+		end try
+	end if
+	
+	if contactOpsScript is missing value then
+		if utilitiesScript is not missing value then
+			cmLogError("ERROR: contactOpsScript is missing value")
+		else
+			cmLogError("⚠️ ERROR: contactOpsScript is missing value")
+		end if
+	else
+		if utilitiesScript is not missing value then
+			cmLogInfo("contactOpsScript is properly defined")
+		else
+			log "✅ contactOpsScript is properly defined"
+		end if
+		
+		-- Only try to set paths if the module is available
+		try
+			contactOpsScript's setSessionPaths(scriptFolder, backupFolder, logsFolder, reportsFolder)
+			if utilitiesScript is not missing value then
+				cmLogInfo("Set session paths in ContactOperations module")
+			else
+				log "Set session paths in ContactOperations module"
+			end if
+		on error pathErr
+			if utilitiesScript is not missing value then
+				cmLogError("Error setting paths in ContactOperations: " & pathErr)
+			else
+				log ("Error setting paths in ContactOperations: " & pathErr)
+			end if
+		end try
+	end if
+	
+	-- Run the backup system with explicit scope checks
+	if utilitiesScript is not missing value then
+		cmLogInfo("Triggering script backup system")
+	else
+		log "5. Triggering script backup system"
+	end if
+	
+	if utilitiesScript is not missing value then
+		try
+			if utilitiesScript is not missing value then
+				cmLogInfo("Calling runBackupSystem...")
+			else
+				log "Calling runBackupSystem..."
+			end if
+			utilitiesScript's runBackupSystem(SYSTEM_VERSION)
+		on error backupErr
+			if utilitiesScript is not missing value then
+				cmLogError("Error in backup system: " & backupErr)
+			else
+				cmLogError("Error in backup system: " & backupErr)
+			end if
+		end try
+	else
+		if utilitiesScript is not missing value then
+			cmLogError("Cannot run backup - utilitiesScript is not available")
+		else
+			log "⚠️ Cannot run backup - utilitiesScript is not available"
+		end if
+	end if
+	
+	if utilitiesScript is not missing value then
+		cmLogInfo("Initialization sequence complete")
+	else
+		log "6. Initialization sequence complete"
+	end if
+	
+	-- Ensure main menu will appear
+	global shouldExitScript
+	set shouldExitScript to false
+	
+	-- ▶ Pass session paths into ContactOperations
+	cmLogInfo("Passing session paths to ContactOperations")
+	contactOpsScript's ¬
+		setSessionPaths(scriptFolder, backupFolder, logsFolder, reportsFolder)
+	-- ▶ (re)set debugMode and testMode flags
+	
+	set debugMode to defaultDebugMode
+	set testMode to defaultTestMode
+	
+	return true
+end initializeSystem
+
+-------------------------------------------------------------------------------
+-- Handler: createSessionFolders
+-- VERSION: 0.9.0-alpha4 (2025-05-21)
+-- PURPOSE: Safely creates CCC Script, session, and subfolders using Utilities
+--          Ensures all global paths are set before logging or any dependent code.
+-------------------------------------------------------------------------------
+on createSessionFolders()
+	global scriptFolder, backupFolder, logsFolder, reportsFolder
+	global utilitiesScript
+	
+	set cccFolder to (path to documents folder as string) & "CCC Script:"
+	set timestamp to ""
+	-- Use unified date/time from Utilities if available
+	if utilitiesScript is not missing value then
+		set timestamp to utilitiesScript's formatTimestamp(current date)
+	else
+		set currentDate to current date
+		set timestamp to ((year of currentDate) as string) & "-" & ((month of currentDate as integer) as string) & "-" & ((day of currentDate) as string) & "_" & ((hours of currentDate) as string) & "-" & ((minutes of currentDate) as string) & "-" & ((seconds of currentDate) as string)
+	end if
+	
+	set sessionFolderName to "Session_" & timestamp
+	set sessionFolder to cccFolder & sessionFolderName & ":"
+	set backupsFolderName to "Backups"
+	set logsFolderName to "Logs"
+	set reportsFolderName to "Reports"
+	
+	-- SET ALL PATH GLOBALS **BEFORE** ANY LOGGING OR SYSTEM CALLS
+	set scriptFolder to sessionFolder
+	set backupFolder to sessionFolder & backupsFolderName & ":"
+	set logsFolder to sessionFolder & logsFolderName & ":"
+	set reportsFolder to sessionFolder & reportsFolderName & ":"
+	
+	try
+		if utilitiesScript is not missing value then
+			utilitiesScript's createFolderPath(cccFolder)
+			utilitiesScript's createFolderPath(sessionFolder)
+			utilitiesScript's createFolderPath(backupFolder)
+			utilitiesScript's createFolderPath(logsFolder)
+			utilitiesScript's createFolderPath(reportsFolder)
+			-- Now, with all paths guaranteed, log as usual
+			cmLogInfo("Ensured all session folders exist (CCC Script, Session, Backups, Logs, Reports)")
+		else
+			-- Finder fallback if utilitiesScript not loaded (should not happen in production)
+			tell application "Finder"
+				if not (exists folder cccFolder) then
+					make new folder at (path to documents folder) with properties {name:"CCC Script"}
+				end if
+				if not (exists folder sessionFolder) then
+					make new folder at cccFolder with properties {name:sessionFolderName}
+				end if
+				if not (exists folder backupFolder) then
+					make new folder at sessionFolder with properties {name:backupsFolderName}
+				end if
+				if not (exists folder logsFolder) then
+					make new folder at sessionFolder with properties {name:logsFolderName}
+				end if
+				if not (exists folder reportsFolder) then
+					make new folder at sessionFolder with properties {name:reportsFolderName}
+				end if
+			end tell
+			cmLogInfo("Ensured all session folders exist (Finder fallback)")
+		end if
+		
+		cmLogInfo("Session folders created successfully:")
+		cmLogInfo("  Session: " & scriptFolder)
+		cmLogInfo("  Backups: " & backupFolder)
+		cmLogInfo("  Logs: " & logsFolder)
+		cmLogInfo("  Reports: " & reportsFolder)
+		
+		-- Only now (paths set!) set logInitialized etc if required elsewhere
+		global logInitialized
+		set logInitialized to false
+		
+		return true
+	on error folderErr
+		cmLogError("Failed to create session folders: " & folderErr)
+		return false
+	end try
+end createSessionFolders
+
+-- Load script modules with proper property assignments and logging
+on loadModules()
+	
+	-- Preserve the session paths in local variables
+	global scriptFolder, backupFolder, logsFolder, reportsFolder
+	set savedSessionFolder to scriptFolder
+	set savedBackupFolder to backupFolder
+	set savedLogsFolder to logsFolder
+	set savedReportsFolder to reportsFolder
+	
+	-- Determine modules folder
+	set modulesFolder to ""
+	try
+		tell application "System Events"
+			set modulesFolder to container of file (path to me) as string
+		end tell
+		log "Modules folder determined: " & modulesFolder
+	on error
+		-- Fallback method using path manipulation
+		set myPath to path to me as string
+		set myName to getFilenameFromPath(myPath)
+		log "Script name: " & myName
+		
+		set oldDelimiters to AppleScript's text item delimiters
+		set AppleScript's text item delimiters to myName
+		set pathParts to text items of myPath
+		
+		if (count of pathParts) > 0 then
+			set modulesFolder to item 1 of pathParts
+		else
+			-- Last resort: use Documents folder
+			set modulesFolder to (path to documents folder as string)
+		end if
+		
+		set AppleScript's text item delimiters to oldDelimiters
+		log "Modules folder from path parts: " & modulesFolder
+	end try
+	
+	-- Build full paths and load each script
+	set utilitiesPath to modulesFolder & "utilities.scpt"
+	set operationsPath to modulesFolder & "contact-operations.scpt"
+	
+	-- Try loading Utilities
+	try
+		set my utilitiesScript to load script (utilitiesPath as alias)
+		log "Utilities module loaded successfully from: " & utilitiesPath
+	on error errUtilities
+		cmLogError("ERROR: Failed to load Utilities module: " & errUtilities)
+		return false
+	end try
+	
+	-- Try loading ContactOperations
+	try
+		set my contactOpsScript to load script (operationsPath as alias)
+		log "ContactOperations module loaded successfully from: " & operationsPath
+	on error errOps
+		cmLogError("ERROR: Failed to load ContactOperations module: " & errOps)
+		return false
+	end try
+	
+	-- Initialise both modules
+	try
+		utilitiesScript's initializeModule()
+		log "Utilities module initialized successfully"
+	on error initUtilErr
+		cmLogError("ERROR: Failed to initialize Utilities module:  " & initUtilErr)
+	end try
+	
+	try
+		contactOpsScript's initializeModule()
+		log "ContactOperations module initialized successfully"
+	on error initOpsErr
+		cmLogError("ERROR: Failed to initialize ContactOperations module: " & initOpsErr)
+	end try
+	
+	-- hand Utilities to ContactOperations
+	try
+		contactOpsScript's setUtilitiesReference(utilitiesScript)
+		if utilitiesScript is not missing value then ¬
+			cmLogDebug("Utilities reference passed to ContactOperations")
+	on error refErr
+		cmLogError("ERROR: Failed to pass Utilities reference to ContactOperations: " & refErr)
+	end try
+	
+	-- Restore the original session paths
+	set scriptFolder to savedSessionFolder
+	set backupFolder to savedBackupFolder
+	set logsFolder to savedLogsFolder
+	set reportsFolder to savedReportsFolder
+	
+	-- Post-load sanity checks
+	if my utilitiesScript is missing value then
+		cmLogWarning("utilitiesScript is still missing value after loading")
+	else
+		if utilitiesScript is not missing value then
+			cmLogInfo("utilitiesScript is properly loaded")
+		else
+			log "✅ utilitiesScript is properly loaded"
+		end if
+	end if
+	
+	if my contactOpsScript is missing value then
+		cmLogWarning("contactOpsScript is still missing value after loading")
+	else
+		if utilitiesScript is not missing value then
+			cmLogInfo("contactOpsScript is properly loaded")
+		else
+			log "✅ contactOpsScript is properly loaded"
+		end if
+	end if
+	
+	if utilitiesScript is not missing value then
+		cmLogInfo("Module loading complete")
+	else
+		log "Module loading complete"
+	end if
+	
+	return true
+end loadModules
+
+-- Signal script exit with enhanced logging and exit reason tracking
+on signalScriptExit()
+	-- Log exit request with proper module context
+	if utilitiesScript is not missing value then
+		cmLogInfo("Signal to exit script received")
+	else
+		log "Signal to exit script received"
+	end if
+	
+	-- Set the global exit flag that will be checked in the main loop
+	global shouldExitScript
+	set shouldExitScript to true
+	
+	-- Log the flag change with module context
+	if utilitiesScript is not missing value then
+		cmLogInfo("Exit flag set to TRUE - script will terminate at next checkpoint")
+	else
+		log "Exit flag set to TRUE - script will terminate at next checkpoint"
+	end if
+	
+	return "exit_script"
+end signalScriptExit
+
+-- ==============================================
+-- LOGGING SYSTEM ACCESS
+-- This section provides access to the logging system deployed in the Utilities Module
+-- ==============================================
+
+-- Synchronize logging settings across all modules
+on synchronizeLogSettings()
+	-- By this point we may have utilitiesScript loaded, so try enhanced logging
+	if utilitiesScript is not missing value then
+		cmLogInfo("Synchronizing log settings across all modules")
+	else
+		-- Fallback to direct console logging if utilities not available
+		log "Synchronizing log settings across all modules"
+	end if
+	
+	-- Access only the variables we know are defined
+	global debugMode
+	
+	-- Set local log level based on debug mode
+	set localLogLevel to 1 -- INFO level
+	if debugMode then
+		set localLogLevel to 2 -- DEBUG level
+	end if
+	
+	-- Use direct logging with proper AppleScript conditional
+	try
+		set levelName to "INFO"
+		if localLogLevel = 2 then set levelName to "DEBUG"
+		
+		if utilitiesScript is not missing value then
+			cmLogInfo("Log level set to " & localLogLevel & " (" & levelName & ")")
+		else
+			log "Log level set to " & localLogLevel & " (" & levelName & ")"
+		end if
+	end try
+	
+	-- Propagate to Utilities module using existing functions
+	try
+		if utilitiesScript is not missing value then
+			-- Use existing methods that we know work
+			utilitiesScript's setLogLevel(localLogLevel)
+			utilitiesScript's setDebugMode(debugMode)
+			
+			-- Log the completion
+			cmLogInfo("Log settings synced with Utilities module")
+		end if
+	on error utilErr
+		-- Use enhanced logging if available, otherwise fall back to console
+		if utilitiesScript is not missing value then
+			cmLogError("Error setting Utilities log settings: " & utilErr)
+		else
+			cmLogError(log "Error setting Utilities log settings: " & utilErr)
+		end if
+	end try
+	
+	-- Propagate to ContactOperations module
+	try
+		if contactOpsScript is not missing value then
+			-- Set directly using existing functions
+			contactOpsScript's setLogLevel(localLogLevel)
+			contactOpsScript's setDebugMode(debugMode)
+			
+			-- Log the completion with enhanced logging if available
+			if utilitiesScript is not missing value then
+				cmLogInfo("Log settings synced with ContactOperations module")
+			else
+				log "Log settings synced with ContactOperations module"
+			end if
+		end if
+	on error opsErr
+		-- Use enhanced logging if available, otherwise fall back to console
+		if utilitiesScript is not missing value then
+			cmLogError("Error setting ContactOperations log settings: " & opsErr)
+		else
+			cmLogError(log "Error setting ContactOperations log settings: " & opsErr)
+		end if
+	end try
+	
+	return true
+end synchronizeLogSettings
+
+-- ==============================================
+-- USER INTERFACE
+-- ==============================================
+-- Main menu and navigation system for the Contact Management System
+-- Organized into logical sections:
+--  - Core Menus: Main menu and primary operations
+--  - Tools Menus: Settings and utilities 
+--  - Backup Menus: Script and contact backup operations
+--  - Helper Functions: UI utilities and shared functions
+
+-- ==============================================
+-- CORE MENUS
+-- ==============================================
+
+-- =============================================================================
+-- Handler: showWelcomeWithPipelineChoice
+-- VERSION: 0.9.0-alpha1 (2025-05-19)
+-- PURPOSE: Display welcome dialog with pipeline version selection
+-- INPUTS:  None
+-- RETURNS: text - "exit" or the chosen pipeline version
+-- =============================================================================
+on showWelcomeWithPipelineChoice()
+	-- Initialize default values
+	set scriptNameLocal to "Contact Management System"
+	set scriptTitleLocal to "Contact Management System (v6.0.0)"
+	set defaultVersionLocal to "v1"
+	
+	-- Try to access global variables, use defaults if they don't exist
+	try
+		set scriptNameLocal to scriptName
+	end try
+	
+	try
+		set scriptTitleLocal to scriptTitle
+	end try
+	
+	try
+		set defaultVersionLocal to defaultPipelineVersion
+	end try
+	
+	-- Prepare version labels with descriptions
+	set v1Label to "Original Pipeline"
+	set v2Label to "New Pipeline"
+	
+	-- Add indicator for default version
+	if defaultVersionLocal is "v1" then
+		set v1Label to v1Label & " (Default)"
+	else
+		set v2Label to v2Label & " (Default)"
+	end if
+	
+	-- Create welcome text
+	set welcomeText to "Welcome to " & scriptNameLocal & " !" & return & return
+	set welcomeText to welcomeText & "This script suite provides utilities for the macOS Contacts app." & return & return
+	set welcomeText to welcomeText & "⚠️  Please back up your Contacts database before making changes." & return & return
+	set welcomeText to welcomeText & "Choose processing pipeline version:"
+	
+	-- Determine default button position (2 for v1, 3 for v2)
+	set defaultButtonPosition to 2 -- Position for v1Label (Original Pipeline)
+	if defaultVersionLocal is "v2" then
+		set defaultButtonPosition to 3 -- Position for v2Label (New Pipeline)
+	end if
+	
+	-- Show dialog with three buttons
+	try
+		set dialogResult to display dialog welcomeText with title scriptTitleLocal buttons {"Exit", v1Label, v2Label} default button defaultButtonPosition
+		
+		-- Process user choice
+		set userChoice to button returned of dialogResult
+		
+		-- Check if user wants to exit
+		if userChoice is "Exit" then
+			return "exit"
+		end if
+		
+		-- Determine which pipeline version was selected
+		if userChoice contains "Original" then
+			return "v1"
+		else
+			return "v2"
+		end if
+	on error errMsg
+		-- Handle any dialog errors
+		try
+			log "Error in welcome dialog: " & errMsg
+		end try
+		
+		-- Default to v1 on error
+		return "v1"
+	end try
+end showWelcomeWithPipelineChoice
+
+-- ===========================================================================
+--  showMainMenu() ▸ Main menu for choosing an action
+--  VERSION : 2025-05-12-fix
+--  PURPOSE : Present user with the three top-level actions, dispatch to the
+--            appropriate handler, and return its result (or exit).
+--  RETURNS : "clean_contacts", "group_management", "tools_settings",
+--            or "exit_script"
+-- ===========================================================================
+on showMainMenu()
+	global shouldExitScript, scriptName, scriptVersion
+	
+	-- If some earlier step already asked us to quit, honor it
+	if shouldExitScript then return "exit_script"
+	
+	set operationResult to "" -- will be filled by the chosen handler
+	
+	repeat until shouldExitScript or operationResult is not ""
+		-- Build and display the list UI (Cancel/Quit sets exit)
+		set menuItems to {"Contact Cleaning", "Group Management", "Tools & Settings"}
+		set userSelection to choose from list menuItems ¬
+			with title (scriptName & " " & scriptVersion) ¬
+			with prompt ¬
+			"Select an action to perform:" default items {"Contact Cleaning"} ¬
+			OK button name "Select" cancel button name "Quit"
+		
+		if userSelection is false then
+			-- User clicked Quit (or pressed Esc)
+			return signalScriptExit()
+		else
+			set chosenItem to item 1 of userSelection as text
+			if chosenItem is "Contact Cleaning" then
+				set operationResult to my handleContactCleaning()
+			else if chosenItem is "Group Management" then
+				set operationResult to my handleGroupManagement()
+			else if chosenItem is "Tools & Settings" then
+				set operationResult to my handleToolsAndSettings()
+			end if
+		end if
+	end repeat
+	
+	-- If we exited via the quit flow, ensure we return the exit code
+	if shouldExitScript then return "exit_script"
+	
+	-- Otherwise return whatever the handler handed back ("" to go back to menu,
+	-- or "exit_script" if it asked to quit)
+	return operationResult
+end showMainMenu
+
+-------------------------------------------------------------------------------
+-- handleContactCleaning() ▸ Main “Clean Contacts” workflow
+-------------------------------------------------------------------------------
+on handleContactCleaning()
+	global testMode, reportsFolder, contactOpsScript, shouldExitScript
+	
+	-- Loop so “Run Again” and “Open Session Folder” simply repeat this block
+	repeat
+		-- 1) Mode selection
+		set modeRes to display dialog ¬
+			"Select whether to run in Simulation (no changes) or Edit (apply changes) mode." & return & return & ¬
+			"Simulation: Preview only. No contact notes will be modified." & return & ¬
+			"Edit: Changes will be applied to your contacts." with title ¬
+			"Cleanup Mode" buttons {"Simulation", "Edit"} ¬
+			default button "Simulation"
+		set modeChoice to button returned of modeRes
+		set testMode to (modeChoice is "Simulation")
+		
+		-- Add forceCleanup dialog
+		set forceRes to display dialog ¬
+			"Process notes with existing CCC footers?" & return & return & ¬
+			"• Skip: Ignore contacts already processed" & return & ¬
+			"• Force: Re-process all selected contacts" with title ¬
+			"Processing Mode" buttons {"Skip", "Force"} ¬
+			default button "Skip"
+		set forceOption to button returned of forceRes
+		
+		-- Set the global in ContactOperations
+		if contactOpsScript is not missing value then
+			if forceOption is "Skip" then
+				contactOpsScript's setForceCleanupMode("No, skip processed notes")
+			else
+				contactOpsScript's setForceCleanupMode("Yes, force cleanup")
+			end if
+		end if
+		
+		-- 2) Scope selection
+		set scopeRes to display dialog ¬
+			"Choose which contacts to process:" & return & return & ¬
+			"• Selected: Only currently highlighted contacts." & return & ¬
+			¬
+				"• All: Every contact in your Contacts app." with title ¬
+			"Contact Scope" buttons {"Selected", "All"} ¬
+			default button "Selected"
+		set scopeChoice to button returned of scopeRes
+		if scopeChoice is "Selected" then
+			set selectionScope to "selected"
+		else
+			set selectionScope to "all"
+		end if
+		
+		-- 3) Run cleanup and capture either the skip-report or the normal summary
+		set batchResult to contactOpsScript's processContactsWithScope(selectionScope, testMode)
+		
+		if batchResult's report is not missing value then
+			-- A concise “nothing to do” report from the short-circuit
+			set fullReport to batchResult's report
+		else
+			-- The normal processing summary
+			set fullReport to contactOpsScript's generateProcessingReport()
+		end if
+		
+		-- 4) save and display fullReport as before
+		set timestamp to utilitiesScript's formatTimestamp(current date)
+		set reportFilePath to reportsFolder & "Cleanup_Report_" & timestamp & ".txt"
+		set ok to contactOpsScript's saveReportToFile(fullReport, reportFilePath)
+		
+		set dialogButtons to {"Run Again", "Main Menu", "Open Session Folder"}
+		set dlgRes to display dialog ¬
+			"Cleanup complete!" & return & return & ¬
+			fullReport & return & return & ¬
+			"Report file saved to:" & return & reportFilePath ¬
+			with title "Cleanup Summary" buttons dialogButtons default button "Main Menu"
+		set chosenBtn to button returned of dlgRes
+		
+		-- 5) Handle the user’s choice
+		if chosenBtn is "Open Session Folder" then
+			tell application "Finder"
+				open folder (reportsFolder as alias)
+			end tell
+			-- no exit: loop repeats (same as your old 'cycle')
+			
+		else if chosenBtn is "Run Again" then
+			-- no exit: loop repeats for a fresh run
+			
+			-- ▸ Flush UI flags so the next run uses the script’s default mode settings
+			set debugMode to defaultDebugMode
+			set testMode to defaultTestMode
+			contactOpsScript's setForceCleanupMode(contactOpsScript's defaultForceCleanupMode)
+			my moduleLogDebug("setForceCleanupMode called with: " & newMode & ", forceCleanup now: " & forceCleanup)
+			
+			-- (now the next iteration will start in the script’s original defaults)
+		else
+			-- Main Menu: break out to parent loop
+			exit repeat
+		end if
+	end repeat
+	
+	-- Returning empty string tells run() to show the main menu again
+	return ""
+end handleContactCleaning
+
+-- GROUP MANAGEMENT: Analyze and update groups
+on handleGroupManagement()
+	-- Initialize operationResult
+	set operationResult to ""
+	
+	-- Log entry to function with enhanced logging
+	if utilitiesScript is not missing value then
+		cmLogInfo("Starting Group Management operation")
+	else
+		log "Starting Group Management operation"
+	end if
+	
+	-- Group management dialog with clearer terminology
+	set groupText to "Group Management:" & return & return
+	set groupText to groupText & "The group management system allows you to:" & return
+	set groupText to groupText & "• Extract tags from contact notes to create groups" & return
+	set groupText to groupText & "• Add group membership as tags in contact notes" & return
+	set groupText to groupText & "• Analyze and fix discrepancies between groups and tags" & return & return
+	set groupText to groupText & "Choose an operation:"
+	
+	-- Three action buttons with Exit option (matching System Settings pattern)
+	set groupChoice to button returned of (display dialog groupText with title "Group Management" buttons {"Exit", "Synchronize Groups", "Analyze Tags"} default button "Analyze Tags")
+	
+	-- Handle Exit (consistent with other menus)
+	if groupChoice is "Exit" then
+		global shouldExitScript
+		set shouldExitScript to true
+		
+		if utilitiesScript is not missing value then
+			cmLogInfo("User requested exit from Group Management menu")
+		else
+			log "User requested exit from Group Management menu"
+		end if
+		
+		return "exit_script"
+	end if
+	
+	-- Handle analyze tags
+	if groupChoice is "Analyze Tags" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User selected Analyze Tags in Group Management")
+		end if
+		
+		-- More informative placeholder with details about the upcoming feature
+		set infoText to "The Tag Analysis tool will scan your contacts to:" & return & return
+		set infoText to infoText & "• Identify group tags in contact notes" & return
+		set infoText to infoText & "• Find contacts that belong to groups but lack tags" & return
+		set infoText to infoText & "• Find contact notes with tags that don't match groups" & return & return
+		set infoText to infoText & "This feature will be implemented in the next version."
+		
+		display dialog infoText with title "Tag Analysis Feature" buttons {"OK"} default button "OK"
+		return handleGroupManagement()
+	end if
+	
+	-- Handle synchronize groups
+	if groupChoice is "Synchronize Groups" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User selected Synchronize Groups in Group Management")
+		end if
+		
+		-- Single-level menu with simplified options
+		set syncText to "Group Synchronization:" & return & return
+		set syncText to syncText & "The Group Synchronization tool will:" & return
+		set syncText to syncText & "• Create groups based on #tags in contact notes" & return
+		set syncText to syncText & "• Add #tags to contacts based on group membership" & return
+		set syncText to syncText & "• Resolve conflicts between tags and groups" & return & return
+		set syncText to syncText & "This feature will be implemented in the next version."
+		
+		display dialog syncText with title "Group Synchronization Feature" buttons {"OK"} default button "OK"
+		return handleGroupManagement()
+	end if
+	
+	-- Return to main menu if we somehow get here
+	return operationResult
+end handleGroupManagement
+
+-- =============================================================================
+-- Handler: handleToolsAndSettings
+-- VERSION: 0.9.0-alpha3 (2025-05-22)
+-- PURPOSE: Top level menu for all utility functions with direct main menu return
+--          from submenus to avoid "menu trap" and improve navigation
+-- INPUTS:  None
+-- RETURNS: Empty string to return to main menu, or "exit_script"
+-- CHANGES: Added Pipeline Comparison option, modified return flow for submenus
+-- =============================================================================
+on handleToolsAndSettings()
+	-- Initialize operationResult
+	set operationResult to ""
+	
+	-- Log entry to function
+	if utilitiesScript is not missing value then
+		cmLogInfo("Entering Tools & Settings menu")
+	else
+		log "Entering Tools & Settings menu"
+	end if
+	
+	-- Tools and settings dialog - updated with Pipeline Comparison
+	set toolsText to "Tools & Settings:" & return & return
+	set toolsText to toolsText & "• Backup Operations: Manage scripts and contacts" & return
+	set toolsText to toolsText & "• System Settings: Logging and configuration" & return
+	set toolsText to toolsText & "• Pipeline Comparison: Compare processing pipelines" & return & return
+	set toolsText to toolsText & "Choose an option:"
+	
+	-- Updated dialog with Pipeline Comparison option
+	set toolChoice to button returned of (display dialog toolsText with title "Tools & Settings" buttons {"Go Back", "Pipeline Comparison", "System Settings"} default button "System Settings")
+	
+	-- Log the user's choice
+	if utilitiesScript is not missing value then
+		cmLogInfo("User selected: " & toolChoice & " in Tools & Settings")
+	end if
+	
+	-- Handle Go Back option - return to main menu
+	if toolChoice is "Go Back" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User returning to main menu from Tools & Settings")
+		end if
+		return operationResult -- Return the initialized value
+	end if
+	
+	-- Handle System Settings
+	if toolChoice is "System Settings" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("Entering System Settings submenu")
+		end if
+		
+		-- Call the System Settings handler with special flag to indicate we should return to main menu
+		set operationResult to handleSystemSettings()
+		
+		-- Check for exit request
+		if operationResult is "exit_script" then
+			global shouldExitScript
+			set shouldExitScript to true
+			
+			if utilitiesScript is not missing value then
+				cmLogInfo("Exit request received from System Settings")
+			end if
+			
+			return "exit_script"
+		end if
+		
+		-- Return directly to main menu
+		return ""
+	end if
+	
+	-- Handle Pipeline Comparison (new direct option)
+	if toolChoice is "Pipeline Comparison" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("Entering Pipeline Comparison submenu directly from Tools menu")
+		end if
+		
+		-- Call the Pipeline Comparison handler
+		set operationResult to handlePipelineComparison()
+		
+		-- Check for exit request
+		if operationResult is "exit_script" then
+			global shouldExitScript
+			set shouldExitScript to true
+			
+			if utilitiesScript is not missing value then
+				cmLogInfo("Exit request received from Pipeline Comparison")
+			end if
+			
+			return "exit_script"
+		end if
+		
+		-- Return directly to main menu
+		return ""
+	end if
+	
+	-- Handle Backup Operations
+	if toolChoice is "Backup Operations" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("Entering Backup Operations submenu")
+		end if
+		
+		-- Call the Backup Operations handler
+		set operationResult to handleBackupOperations()
+		
+		-- Check for exit request
+		if operationResult is "exit_script" then
+			global shouldExitScript
+			set shouldExitScript to true
+			
+			if utilitiesScript is not missing value then
+				cmLogInfo("Exit request received from Backup Operations")
+			end if
+			
+			return "exit_script"
+		end if
+		
+		-- Return directly to main menu
+		return ""
+	end if
+	
+	-- Default - return to main menu
+	return ""
+end handleToolsAndSettings
+
+-- =============================================================================
+-- Handler: handleSystemSettingsDirect
+-- VERSION: 0.9.0-alpha3 (2025-05-22)
+-- PURPOSE: System settings menu with direct return to main menu
+-- INPUTS:  None
+-- RETURNS: Empty string to return to main menu, or "exit_script"
+-- =============================================================================
+on handleSystemSettings()
+	-- Initialize operationResult
+	set operationResult to ""
+	
+	-- Log entry to function
+	if utilitiesScript is not missing value then
+		cmLogInfo("Entering System Settings menu (direct mode)")
+	else
+		log "Entering System Settings menu (direct mode)"
+	end if
+	
+	-- System settings dialog - text clearly matches the 3 available buttons
+	set settingsText to "System Settings:" & return & return
+	set settingsText to settingsText & "Select from the following options:" & return & return
+	set settingsText to settingsText & "• Version Info: View system version and statistics" & return
+	set settingsText to settingsText & "• More Options: Access logging and statistics features" & return
+	set settingsText to settingsText & "• Main Menu: Return to main menu"
+	
+	-- Updated button label from "Go Back" to "Main Menu" for clarity
+	set settingsChoice to button returned of (display dialog settingsText with title "System Settings" buttons {"Main Menu", "More Options", "Version Info"} default button "More Options")
+	
+	-- Log the user's choice
+	if utilitiesScript is not missing value then
+		cmLogInfo("User selected: " & settingsChoice & " in System Settings")
+	end if
+	
+	-- Handle Main Menu - return directly to main menu
+	if settingsChoice is "Main Menu" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User returning to main menu from System Settings")
+		end if
+		return operationResult
+	end if
+	
+	-- Handle version info
+	if settingsChoice is "Version Info" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("Displaying Version Information")
+		end if
+		
+		display dialog getVersionReport() with title "System Version Information" buttons {"OK"} default button "OK"
+		-- Return to system settings after viewing version info
+		return handleSystemSettings()
+	end if
+	
+	-- Handle More Options - show a submenu for the remaining options
+	if settingsChoice is "More Options" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("Entering Additional Options submenu")
+		end if
+		
+		-- Show submenu for additional options - text matches the 3 available buttons
+		set subMenuText to "Additional Options:" & return & return
+		set subMenuText to subMenuText & "Select from the following features:" & return & return
+		set subMenuText to subMenuText & "• Logging: Configure logging and debug mode" & return
+		set subMenuText to subMenuText & "• Statistics: View and manage cumulative stats" & return
+		set subMenuText to subMenuText & "• Return: Go back to system settings menu"
+		
+		set subChoice to button returned of (display dialog subMenuText with title "Additional Options" buttons {"Return", "Statistics", "Logging"} default button "Logging")
+		
+		-- Log the user's submenu choice
+		if utilitiesScript is not missing value then
+			cmLogInfo("User selected: " & subChoice & " in Additional Options")
+		end if
+		
+		if subChoice is "Return" then
+			if utilitiesScript is not missing value then
+				cmLogInfo("Returning to System Settings from Additional Options")
+			end if
+			-- Return to system settings menu
+			return handleSystemSettingsDirect()
+		end if
+		
+		if subChoice is "Logging" then
+			set operationResult to handleLoggingOptions()
+			-- Check for exit signal from logging options
+			if operationResult is "exit_script" then
+				if utilitiesScript is not missing value then
+					cmLogInfo("Exit request received from Logging Options")
+				end if
+				return "exit_script"
+			end if
+		end if
+		
+		if subChoice is "Statistics" then
+			set operationResult to handleStatisticsManagement()
+			-- Check for exit signal from statistics management
+			if operationResult is "exit_script" then
+				if utilitiesScript is not missing value then
+					cmLogInfo("Exit request received from Statistics Management")
+				end if
+				return "exit_script"
+			end if
+		end if
+	end if
+	
+	-- Return to system settings
+	return handleSystemSettings()
+end handleSystemSettings
+
+-- =============================================================================
+-- Handler: handleBackupOperationsDirect
+-- VERSION: 0.9.0-alpha3 (2025-05-22)
+-- PURPOSE: Backup operations menu with direct return to main menu
+-- INPUTS:  None
+-- RETURNS: Empty string to return to main menu, or "exit_script"
+-- =============================================================================
+on handleBackupOperations()
+	-- Initialize operationResult
+	set operationResult to ""
+	
+	-- Log entry to function
+	if utilitiesScript is not missing value then
+		cmLogInfo("Entering Backup Operations menu (direct mode)")
+	else
+		log "Entering Backup Operations menu (direct mode)"
+	end if
+	
+	-- Backup operations dialog
+	set backupText to "Backup Operations:" & return & return
+	set backupText to backupText & "• Script Backups: Backup and restore scripts" & return
+	set backupText to backupText & "• Contact Backups: Backup and restore contacts" & return & return
+	set backupText to backupText & "Choose an operation:"
+	
+	-- Updated from "Exit" to "Main Menu" for clarity and consistency
+	set backupChoice to button returned of (display dialog backupText with title "Backup Operations" buttons {"Main Menu", "Contact Backups", "Script Backups"} default button "Script Backups")
+	
+	-- Log the user's choice
+	if utilitiesScript is not missing value then
+		cmLogInfo("User selected: " & backupChoice & " in Backup Operations")
+	end if
+	
+	-- Handle Main Menu - return to main menu
+	if backupChoice is "Main Menu" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User returning to main menu from Backup Operations")
+		end if
+		return operationResult
+	end if
+	
+	-- Handle script backups
+	if backupChoice is "Script Backups" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("Entering Script Backups submenu")
+		end if
+		
+		set operationResult to handleScriptBackups()
+		-- Check for exit request passed up from deeper menus
+		if operationResult is "exit_script" then
+			if utilitiesScript is not missing value then
+				cmLogInfo("Exit request received from Script Backups")
+			end if
+			return "exit_script"
+		end if
+	end if
+	
+	-- Handle contact backups
+	if backupChoice is "Contact Backups" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("Entering Contact Backups submenu")
+		end if
+		
+		set operationResult to handleContactBackups()
+		-- Check for exit request passed up from deeper menus
+		if operationResult is "exit_script" then
+			if utilitiesScript is not missing value then
+				cmLogInfo("Exit request received from Contact Backups")
+			end if
+			return "exit_script"
+		end if
+	end if
+	
+	-- Return to backup operations (recursive call)
+	return handleBackupOperations()
+end handleBackupOperations
+
+-- Enhanced logging options with comprehensive testing and improved tracking
+on handleLoggingOptions()
+	-- Initialize operationResult
+	set operationResult to ""
+	
+	-- Log entry to function with proper module context
+	if utilitiesScript is not missing value then
+		cmLogInfo("Entering Logging Options menu")
+	else
+		log "Entering Logging Options menu"
+	end if
+	
+	-- Determine current status for better messaging
+	global debugMode
+	
+	set statusText to "Current logging level: "
+	if debugMode then
+		set statusText to statusText & "DEBUG (verbose)"
+	else
+		set statusText to statusText & "INFO (standard)"
+	end if
+	
+	-- Log current status
+	if utilitiesScript is not missing value then
+		cmLogInfo("Current logging status: " & statusText)
+	end if
+	
+	-- Logging options dialog
+	set loggingText to "Logging Options:" & return & return
+	set loggingText to loggingText & statusText & return & return
+	set loggingText to loggingText & "• Toggle Debug Mode: Switch between standard/verbose logging" & return
+	set loggingText to loggingText & "• View Log Files: Open the logs folder" & return
+	set loggingText to loggingText & "• Test Logging: Write test entries at all levels" & return & return
+	set loggingText to loggingText & "Choose an operation:"
+	
+	-- Display menu and capture user choice
+	set logChoice to button returned of (display dialog loggingText with title "Logging Options" buttons {"Go Back", "Test Logging", "Toggle Debug Mode"} default button "Toggle Debug Mode")
+	
+	-- Log user's selection with proper context
+	if utilitiesScript is not missing value then
+		cmLogInfo("User selected: " & logChoice & " in Logging Options menu")
+	else
+		log "User selected: " & logChoice & " in Logging Options menu"
+	end if
+	
+	-- Handle Go Back option
+	if logChoice is "Go Back" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User returning to previous menu from Logging Options")
+		end if
+		return operationResult
+	end if
+	
+	-- Handle toggle debug mode
+	if logChoice is "Toggle Debug Mode" then
+		-- Log the action with details
+		if utilitiesScript is not missing value then
+			cmLogInfo("Toggling debug mode from " & (debugMode as string) & " to " & ((not debugMode) as string))
+		else
+			cmLogDebug("Toggling debug mode from ") & (debugMode as string) & " to " & ((not debugMode) as string)
+		end if
+		
+		-- Invert current debug mode
+		set debugMode to not debugMode
+		
+		-- Set log level based on debug mode
+		if debugMode then
+			if utilitiesScript is not missing value then
+				-- Log the action before executing it
+				cmLogInfo("Setting debug mode to TRUE in Utilities module")
+				
+				try
+					-- Set debug mode first, then log level
+					utilitiesScript's setDebugMode(true)
+					cmLogInfo("Debug mode successfully enabled in Utilities module")
+				on error errMsg
+					cmLogError("Error setting debug mode in Utilities: " & errMsg)
+				end try
+				
+				-- Log the dialog display
+				cmLogInfo("Displaying debug mode enabled confirmation dialog")
+				display dialog "Debug logging enabled. All messages including detailed debug information will be logged." with title "Logging Changed" buttons {"OK"} default button "OK"
+				
+				-- Force sync to ensure all modules are updated
+				cmLogInfo("Synchronizing log settings across all modules")
+				synchronizeLogSettings()
+				
+				-- Add test message to verify
+				cmLogInfo("✅ DEBUG MODE ENABLED - Verbose logging activated")
+				
+				-- Test debug logging
+				cmLogDebug("Sending test debug message")
+				if utilitiesScript is not missing value then
+					utilitiesScript's moduleLogDebug("Contact Manager", "Test debug message after enabling debug mode - should appear in logs")
+				end if
+			else
+				-- Fall back to console logging if utilities not available
+				cmLogDebug("Setting debug mode to TRUE but utilities module not available")
+				display dialog "Debug logging enabled, but utilities module not available. Some logging features may not work correctly." with title "Logging Changed" buttons {"OK"} default button "OK" with icon caution
+			end if
+		else
+			-- Disabling debug mode
+			if utilitiesScript is not missing value then
+				-- Log the action before executing it
+				cmLogInfo("Setting debug mode to FALSE in Utilities module")
+				
+				try
+					-- Set debug mode first
+					utilitiesScript's setDebugMode(false)
+					cmLogInfo("Debug mode successfully disabled in Utilities module")
+				on error errMsg
+					cmLogError("Error setting debug mode in Utilities: " & errMsg)
+				end try
+				
+				-- Log the dialog display
+				cmLogInfo("Displaying standard logging enabled confirmation dialog")
+				display dialog "Standard logging enabled. Only important operations will be logged." with title "Logging Changed" buttons {"OK"} default button "OK"
+				
+				-- Force sync to ensure all modules are updated
+				cmLogInfo("Synchronizing log settings across all modules")
+				synchronizeLogSettings()
+				
+				-- Add test message to verify
+				cmLogInfo("✅ DEBUG MODE DISABLED - Standard logging activated")
+				
+				-- Test debug and info logging
+				if utilitiesScript is not missing value then
+					cmLogDebug("Sending test debug message (should not appear in logs)")
+					utilitiesScript's moduleLogDebug("Contact Manager", "Test debug message after disabling debug mode - should NOT appear in logs")
+					
+					cmLogInfo("Sending test info message (should still appear in logs)")
+					utilitiesScript's moduleLogInfo("Contact Manager", "Test info message after disabling debug mode - should still appear")
+				end if
+			else
+				-- Fall back to console logging if utilities not available
+				cmLogDebug("Setting debug mode to FALSE but utilities module not available")
+				display dialog "Standard logging enabled, but utilities module not available. Some logging features may not work correctly." with title "Logging Changed" buttons {"OK"} default button "OK" with icon caution
+			end if
+		end if
+	end if
+	
+	-- Handle view log files
+	if logChoice is "View Log Files" then
+		global logsFolder
+		
+		if utilitiesScript is not missing value then
+			cmLogInfo("User requested to view log files")
+		end if
+		
+		if logsFolder is not "" and logsFolder is not missing value then
+			if utilitiesScript is not missing value then
+				cmLogInfo("Opening logs folder: " & logsFolder)
+			end if
+			
+			try
+				tell application "Finder"
+					open folder logsFolder
+				end tell
+				
+				if utilitiesScript is not missing value then
+					cmLogInfo("Successfully opened logs folder in Finder")
+				end if
+			on error errMsg
+				if utilitiesScript is not missing value then
+					cmLogError("Error opening logs folder: " & errMsg)
+				end if
+				display dialog "Error opening logs folder: " & errMsg with title "Folder Error" buttons {"OK"} default button "OK" with icon caution
+			end try
+		else
+			if utilitiesScript is not missing value then
+				cmLogError("Logs folder path not available")
+			end if
+			display dialog "Logs folder not available." with title "Folder Error" buttons {"OK"} default button "OK" with icon caution
+		end if
+	end if
+	
+	-- Handle test logging
+	if logChoice is "Test Logging" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("Starting comprehensive logging test")
+			
+			cmLogInfo("===== LOGGING TEST BEGINNING =====")
+			
+			-- Log test messages at different levels for verification
+			try
+				-- Info level test
+				cmLogInfo("Testing INFO level logging")
+				utilitiesScript's moduleLogInfo("Contact Manager", "TEST INFO: This is a test info message from ContactManager")
+				
+				-- Error level test
+				cmLogInfo("Testing ERROR level logging")
+				utilitiesScript's moduleLogError("Contact Manager", "TEST ERROR: This is a test error message from ContactManager")
+				
+				-- Debug level test
+				cmLogInfo("Testing DEBUG level logging")
+				utilitiesScript's moduleLogDebug("Contact Manager", "TEST DEBUG: This is a test debug message from ContactManager")
+				
+				-- Log current settings for reference
+				cmLogInfo("CURRENT SETTINGS: debugMode=" & (debugMode as string))
+				
+				-- Direct console logging test
+				cmLogInfo("Testing direct console logging")
+				log "TEST CONSOLE: Direct console message from ContactManager - should appear in log file"
+				
+				cmLogInfo("Logging test completed successfully")
+			on error errMsg
+				cmLogError("Error during logging test: " & errMsg)
+			end try
+		else
+			-- Fall back to console logging if utilities not available
+			log "Starting logging test (utilities module not available)"
+			log "===== LOGGING TEST BEGINNING ====="
+			log "TEST INFO: This would be an info level message"
+			log "TEST ERROR: This would be an error level message"
+			log "TEST DEBUG: This would be a debug level message"
+			cmLogDebug("CURRENT SETTINGS: debugMode=") & (debugMode as string)
+		end if
+		
+		-- Log the dialog display
+		if utilitiesScript is not missing value then
+			cmLogInfo("Displaying logging test completion dialog")
+		end if
+		
+		-- Show confirmation
+		display dialog "Test log entries created. Check the log file to verify all messages are properly logged." with title "Logging Test" buttons {"OK"} default button "OK"
+	end if
+	
+	-- Log returning to the logging options menu (recursion)
+	if utilitiesScript is not missing value then
+		cmLogInfo("Returning to Logging Options menu")
+	end if
+	
+	-- Return to logging options recursively
+	return handleLoggingOptions()
+end handleLoggingOptions
+
+-- ==============================================
+-- BACKUP MENUS
+-- ==============================================
+
+-- Enhanced script backup management with improved logging and error handling
+on handleScriptBackups()
+	-- Initialize operationResult
+	set operationResult to ""
+	
+	-- Log entry to function with module context
+	if utilitiesScript is not missing value then
+		cmLogInfo("Entering Script Backups menu")
+	else
+		log "Entering Script Backups menu"
+	end if
+	
+	-- Script backups dialog
+	set scriptText to "Script Backups:" & return & return
+	set scriptText to scriptText & "• Backup Now: Create a new script backup immediately" & return
+	set scriptText to scriptText & "• Browse Versions: View and restore script versions" & return & return
+	set scriptText to scriptText & "Choose an operation:"
+	
+	-- Display dialog and capture user choice
+	set scriptChoice to button returned of (display dialog scriptText with title "Script Backups" buttons {"Go Back", "Browse Versions", "Backup Now"} default button "Backup Now")
+	
+	-- Log user's selection with proper context
+	if utilitiesScript is not missing value then
+		cmLogInfo("User selected: " & scriptChoice & " in Script Backups menu")
+	else
+		log "User selected: " & scriptChoice & " in Script Backups menu"
+	end if
+	
+	-- Handle Go Back option
+	if scriptChoice is "Go Back" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User returning to previous menu from Script Backups")
+		end if
+		return operationResult
+	end if
+	
+	-- Handle backup now
+	if scriptChoice is "Backup Now" then
+		if utilitiesScript is not missing value then
+			-- Log the action before executing
+			cmLogInfo("Initiating manual script backup")
+			
+			try
+				-- Attempt the backup operation
+				set backupResult to utilitiesScript's forceBackup(SYSTEM_VERSION)
+				
+				-- Log the result
+				if backupResult's success then
+					cmLogInfo("Script backup successful - Version: " & backupResult's version)
+					
+					-- Show success dialog
+					cmLogInfo("Displaying backup success dialog")
+					display dialog "Scripts backed up successfully." & return & "Version: " & backupResult's version with title "Backup Successful" buttons {"OK"} default button "OK"
+				else
+					-- Log failure with reason
+					cmLogError("Script backup failed: " & backupResult's reason)
+					
+					-- Show failure dialog
+					cmLogInfo("Displaying backup failure dialog")
+					display dialog "Failed to back up scripts: " & backupResult's reason with title "Backup Failed" buttons {"OK"} default button "OK" with icon caution
+				end if
+			on error errMsg
+				-- Log any unexpected errors
+				cmLogError("Error during backup operation: " & errMsg)
+				display dialog "An unexpected error occurred during backup: " & errMsg with title "Backup Error" buttons {"OK"} default button "OK" with icon stop
+			end try
+		else
+			-- Log the module missing error
+			log "Cannot perform backup - utilities module not available"
+			display dialog "Utilities module not available" with title "Module Error" buttons {"OK"} default button "OK" with icon stop
+		end if
+	end if
+	
+	-- Handle browse versions
+	if scriptChoice is "Browse Versions" then
+		if utilitiesScript is not missing value then
+			-- Log the action
+			cmLogInfo("User selected Browse Versions (feature not yet implemented)")
+		end if
+		
+		-- Implementation for browsing and restoring script versions
+		display dialog "Script version browsing will be implemented in the next version." with title "Feature Notice" buttons {"OK"} default button "OK"
+	end if
+	
+	-- Log returning to the script backups menu (recursion)
+	if utilitiesScript is not missing value then
+		cmLogInfo("Returning to Script Backups menu")
+	end if
+	
+	-- Return to script backups recursively
+	return handleScriptBackups()
+end handleScriptBackups
+
+-- Contact backup management with logging and error tracking
+on handleContactBackups()
+	-- Initialize operationResult
+	set operationResult to ""
+	
+	-- Log entry to function with module context
+	if utilitiesScript is not missing value then
+		cmLogInfo("Entering Contact Backups menu")
+	else
+		log "Entering Contact Backups menu"
+	end if
+	
+	-- Contact backups dialog
+	set contactText to "Contact Backups:" & return & return
+	set contactText to contactText & "• Backup Contact: Create a backup of selected contact" & return
+	set contactText to contactText & "• Restore Contact: Restore a contact from backup" & return & return
+	set contactText to contactText & "Choose an operation:"
+	
+	-- Display dialog and capture user choice
+	set contactChoice to button returned of (display dialog contactText with title "Contact Backups" buttons {"Go Back", "Restore Contact", "Backup Contact"} default button "Backup Contact")
+	
+	-- Log user's selection with proper context
+	if utilitiesScript is not missing value then
+		cmLogInfo("User selected: " & contactChoice & " in Contact Backups menu")
+	else
+		log "User selected: " & contactChoice & " in Contact Backups menu"
+	end if
+	
+	-- Handle Go Back option
+	if contactChoice is "Go Back" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User returning to previous menu from Contact Backups")
+		end if
+		return operationResult
+	end if
+	
+	-- Handle backup contact
+	if contactChoice is "Backup Contact" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User requested to backup a contact")
+		end if
+		
+		try
+			set backupResult to backupContact()
+			
+			-- Log the result if available
+			if utilitiesScript is not missing value and backupResult is not missing value then
+				if backupResult is record and backupResult contains "success" then
+					if backupResult's success then
+						cmLogInfo("Contact backup completed successfully")
+					else
+						cmLogError("Contact backup failed: " & backupResult's reason)
+					end if
+				end if
+			end if
+		on error errMsg
+			-- Log error with context
+			if utilitiesScript is not missing value then
+				cmLogError("Error during contact backup: " & errMsg)
+			else
+				cmLogError(log "Error during contact backup: " & errMsg)
+			end if
+		end try
+	end if
+	
+	-- Handle restore contact
+	if contactChoice is "Restore Contact" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User requested to restore a contact")
+		end if
+		
+		try
+			set restoreResult to restoreContact()
+			
+			-- Log the result if available
+			if utilitiesScript is not missing value and restoreResult is not missing value then
+				if restoreResult is record and restoreResult contains "success" then
+					if restoreResult's success then
+						cmLogInfo("Contact restoration completed successfully")
+					else
+						cmLogError("Contact restoration failed: " & restoreResult's reason)
+					end if
+				end if
+			end if
+		on error errMsg
+			-- Log error with context
+			if utilitiesScript is not missing value then
+				cmLogError("Error during contact restoration: " & errMsg)
+			else
+				cmLogError(log "Error during contact restoration: " & errMsg)
+			end if
+		end try
+	end if
+	
+	-- Log returning to the contact backups menu (recursion)
+	if utilitiesScript is not missing value then
+		cmLogInfo("Returning to Contact Backups menu")
+	end if
+	
+	-- Return to contact backups
+	return handleContactBackups()
+end handleContactBackups
+
+-- Create contact backup with enhanced logging and error handling
+on backupContact()
+	-- Initialize default return value
+	set backupResult to {success:false, reason:"Not completed", path:""}
+	
+	-- Log entry to function with module context
+	if utilitiesScript is not missing value then
+		cmLogInfo("Starting contact backup operation")
+	else
+		log "Starting contact backup operation"
+	end if
+	
+	-- Wrap entire operation in error handling block
+	try
+		-- Backup contact dialog - work with Contacts
+		tell application "Contacts"
+			-- Log getting selection
+			if utilitiesScript is not missing value then
+				cmLogInfo("Getting selected contacts from Contacts app")
+			end if
+			
+			set selectedContacts to selection
+			
+			-- Check if any contacts are selected
+			if (count of selectedContacts) is 0 then
+				if utilitiesScript is not missing value then
+					cmLogError("No contacts selected for backup")
+				end if
+				
+				-- Show error dialog
+				display dialog "Please select a contact to backup." with title "No Selection" buttons {"OK"} default button "OK"
+				set backupResult to {success:false, reason:"No contacts selected", path:""}
+				return backupResult
+			end if
+			
+			-- Check if multiple contacts are selected
+			if (count of selectedContacts) > 1 then
+				if utilitiesScript is not missing value then
+					cmLogError("Multiple contacts selected (" & (count of selectedContacts) & ") - only one allowed")
+				end if
+				
+				-- Show error dialog
+				display dialog "Please select only one contact to backup." with title "Multiple Selection" buttons {"OK"} default button "OK"
+				set backupResult to {success:false, reason:"Multiple contacts selected", path:""}
+				return backupResult
+			end if
+			
+			-- Get the selected contact
+			set theContact to item 1 of selectedContacts
+			
+			-- Get contact name safely
+			try
+				set contactName to name of theContact
+				
+				if utilitiesScript is not missing value then
+					cmLogInfo("Selected contact for backup: " & contactName)
+				end if
+			on error nameErr
+				set contactName to "Unknown Contact"
+				if utilitiesScript is not missing value then
+					cmLogError("Error getting contact name: " & nameErr)
+				end if
+			end try
+			
+			-- Backup type selection dialog
+			set backupTypeText to "Backup Type for " & contactName & ":" & return & return
+			set backupTypeText to backupTypeText & "• Full Contact: Complete vCard backup" & return
+			set backupTypeText to backupTypeText & "• Note Only: Just backup the contact note" & return & return
+			set backupTypeText to backupTypeText & "Choose a backup type:"
+			
+			-- Log showing backup type dialog
+			if utilitiesScript is not missing value then
+				cmLogInfo("Displaying backup type selection dialog")
+			end if
+			
+			set typeChoice to button returned of (display dialog backupTypeText with title "Contact Backup - Type Selection" buttons {"Cancel", "Note Only", "Full Contact"} default button "Full Contact")
+			
+			-- Log user's selection
+			if utilitiesScript is not missing value then
+				cmLogInfo("User selected backup type: " & typeChoice)
+			end if
+			
+			-- Handle Cancel option
+			if typeChoice is "Cancel" then
+				if utilitiesScript is not missing value then
+					cmLogInfo("Contact backup canceled by user")
+				end if
+				
+				set backupResult to {success:false, reason:"Canceled by user", path:""}
+				return backupResult
+			end if
+			
+			-- Handle Full Contact backup
+			if typeChoice is "Full Contact" then
+				if utilitiesScript is not missing value then
+					cmLogInfo("Creating full vCard backup for: " & contactName)
+				end if
+				
+				-- Get vCard content safely
+				try
+					set contactNote to note of theContact
+					set vcardContent to vcard of theContact as text
+					
+					if utilitiesScript is not missing value then
+						cmLogInfo("Successfully extracted vCard content (" & (length of vcardContent) & " bytes)")
+					end if
+				on error vcardErr
+					if utilitiesScript is not missing value then
+						cmLogError("Error extracting vCard content: " & vcardErr)
+					end if
+					
+					-- Show error dialog
+					display dialog "Failed to extract vCard data: " & vcardErr with title "vCard Error" buttons {"OK"} default button "OK" with icon stop
+					set backupResult to {success:false, reason:"Failed to extract vCard: " & vcardErr, path:""}
+					return backupResult
+				end try
+				
+				-- Create backup using utilities module
+				if utilitiesScript is not missing value then
+					-- Log the backup attempt
+					cmLogInfo("Creating versioned backup for vCard")
+					
+					try
+						set backupResult to utilitiesScript's createVersionedBackup(contactName, vcardContent, "vcard")
+						
+						-- Log the result
+						if backupResult's success then
+							cmLogInfo("Successfully created vCard backup at: " & backupResult's path)
+							
+							-- Show success dialog
+							display dialog "Successfully created full backup for " & contactName & "." with title "Backup Successful" buttons {"OK"} default button "OK"
+						else
+							cmLogError("Failed to create vCard backup: " & backupResult's errorMessage)
+							
+							-- Show error dialog
+							display dialog "Failed to create backup: " & backupResult's errorMessage with title "Backup Failed" buttons {"OK"} default button "OK" with icon stop
+						end if
+					on error backupErr
+						cmLogError("Error during vCard backup: " & backupErr)
+						
+						-- Show error dialog
+						display dialog "Error creating backup: " & backupErr with title "Backup Error" buttons {"OK"} default button "OK" with icon stop
+						set backupResult to {success:false, reason:"Backup error: " & backupErr, path:""}
+					end try
+				else
+					-- Log the missing utilities module
+					log "Cannot create backup - utilities module not available"
+					
+					-- Show error dialog
+					display dialog "Utilities module not available" with title "Module Error" buttons {"OK"} default button "OK" with icon stop
+					set backupResult to {success:false, reason:"Utilities module not available", path:""}
+				end if
+			else if typeChoice is "Note Only" then
+				-- Log the note-only backup
+				if utilitiesScript is not missing value then
+					cmLogInfo("Creating note-only backup for: " & contactName)
+				end if
+				
+				-- Get note content safely
+				try
+					set contactNote to note of theContact
+					
+					if contactNote is missing value then
+						set contactNote to ""
+						
+						if utilitiesScript is not missing value then
+							cmLogInfo("Note is empty, will create backup with empty note")
+						end if
+					else
+						if utilitiesScript is not missing value then
+							cmLogInfo("Successfully extracted note content (" & (length of contactNote) & " bytes)")
+						end if
+					end if
+				on error noteErr
+					if utilitiesScript is not missing value then
+						cmLogError("Error extracting note content: " & noteErr)
+					end if
+					
+					-- Show error dialog
+					display dialog "Failed to extract note data: " & noteErr with title "Note Error" buttons {"OK"} default button "OK" with icon stop
+					set backupResult to {success:false, reason:"Failed to extract note: " & noteErr, path:""}
+					return backupResult
+				end try
+				
+				-- Create backup using utilities module
+				if utilitiesScript is not missing value then
+					-- Log the backup attempt
+					cmLogInfo("Creating versioned backup for note")
+					
+					try
+						set backupResult to utilitiesScript's createVersionedBackup(contactName, contactNote, "note")
+						
+						-- Log the result
+						if backupResult's success then
+							cmLogInfo("Successfully created note backup at: " & backupResult's path)
+							
+							-- Show success dialog
+							display dialog "Successfully created note backup for " & contactName & "." with title "Backup Successful" buttons {"OK"} default button "OK"
+						else
+							cmLogError("Failed to create note backup: " & backupResult's errorMessage)
+							
+							-- Show error dialog
+							display dialog "Failed to create note backup: " & backupResult's errorMessage with title "Backup Failed" buttons {"OK"} default button "OK" with icon stop
+						end if
+					on error backupErr
+						cmLogError("Error during note backup: " & backupErr)
+						
+						-- Show error dialog
+						display dialog "Error creating note backup: " & backupErr with title "Backup Error" buttons {"OK"} default button "OK" with icon stop
+						set backupResult to {success:false, reason:"Backup error: " & backupErr, path:""}
+					end try
+				else
+					-- Log the missing utilities module
+					log "Cannot create note backup - utilities module not available"
+					
+					-- Show error dialog
+					display dialog "Utilities module not available" with title "Module Error" buttons {"OK"} default button "OK" with icon stop
+					set backupResult to {success:false, reason:"Utilities module not available", path:""}
+				end if
+			end if
+		end tell
+	on error generalErr
+		-- Log any unexpected errors
+		if utilitiesScript is not missing value then
+			cmLogError("Unexpected error in backupContact: " & generalErr)
+		else
+			cmLogError(log "Unexpected error in backupContact: " & generalErr)
+		end if
+		
+		-- Show error dialog
+		display dialog "An unexpected error occurred during backup: " & generalErr with title "Backup Error" buttons {"OK"} default button "OK" with icon stop
+		set backupResult to {success:false, reason:"Unexpected error: " & generalErr, path:""}
+	end try
+	
+	-- Log function exit
+	if utilitiesScript is not missing value then
+		if backupResult's success then
+			cmLogInfo("Contact backup operation completed successfully")
+		else
+			cmLogInfo("Contact backup operation completed with issues: " & backupResult's reason)
+		end if
+	end if
+	
+	return backupResult
+end backupContact
+
+-- Restore contact from backup with enhanced logging (placeholder for future implementation)
+on restoreContact()
+	-- Initialize default return value
+	set restoreResult to {success:false, reason:"Not implemented", path:""}
+	
+	-- Log entry to function with module context
+	if utilitiesScript is not missing value then
+		cmLogInfo("Starting contact restoration operation (placeholder)")
+	else
+		log "Starting contact restoration operation (placeholder)"
+	end if
+	
+	-- Log that this is a placeholder function
+	if utilitiesScript is not missing value then
+		cmLogInfo("Contact restoration feature not yet implemented")
+	end if
+	
+	-- Show feature notice dialog
+	if utilitiesScript is not missing value then
+		cmLogInfo("Displaying feature notice dialog")
+	end if
+	
+	display dialog "Contact restoration will be implemented in the next version." with title "Feature Notice" buttons {"OK"} default button "OK"
+	
+	-- Log user acknowledgment
+	if utilitiesScript is not missing value then
+		cmLogInfo("User acknowledged feature notice dialog")
+	end if
+	
+	-- Log function exit
+	if utilitiesScript is not missing value then
+		cmLogInfo("Contact restoration operation completed (placeholder)")
+	end if
+	
+	-- Since this is a placeholder, return a consistent result structure
+	return {success:false, reason:"Feature not implemented yet", path:""}
+end restoreContact
+
+-- ==============================================
+-- HELPER FUNCTIONS
+-- ==============================================
+
+-- PURPOSE: Toggle simulation mode with enhanced logging and status tracking
+on toggleSimulationMode()
+	-- Log entry to function with module context
+	if utilitiesScript is not missing value then
+		cmLogInfo("Toggle simulation mode requested")
+	else
+		log "Toggle simulation mode requested"
+	end if
+	
+	-- Access global mode variable
+	global testMode
+	
+	-- Log the current state before change
+	if utilitiesScript is not missing value then
+		cmLogInfo("Current simulation mode: " & testMode)
+	end if
+	
+	-- Toggle the mode
+	set testMode to not testMode
+	
+	-- Log the state change with detailed context
+	if utilitiesScript is not missing value then
+		if testMode then
+			cmLogInfo("Simulation mode ENABLED - No changes will be made to contacts")
+		else
+			cmLogInfo("Simulation mode DISABLED - Changes will be applied to contacts")
+		end if
+	end if
+	
+	-- Inform ContactOperations module of the change if available
+	try
+		if contactOpsScript is not missing value then
+			-- Log the propagation attempt
+			if utilitiesScript is not missing value then
+				cmLogInfo("Propagating simulation mode to ContactOperations module")
+			end if
+			
+			contactOpsScript's setDebugMode(testMode)
+			
+			-- Log successful propagation
+			if utilitiesScript is not missing value then
+				cmLogInfo("Simulation mode successfully propagated to ContactOperations")
+			end if
+		end if
+	on error propagateErr
+		-- Log propagation error
+		if utilitiesScript is not missing value then
+			cmLogError("Error propagating simulation mode: " & propagateErr)
+		else
+			cmLogError(log "Error propagating simulation mode: " & propagateErr)
+		end if
+	end try
+	
+	-- Display confirmation dialog
+	if utilitiesScript is not missing value then
+		cmLogInfo("Displaying simulation mode confirmation dialog")
+	end if
+	
+	if testMode then
+		display dialog "Simulation mode ENABLED. No changes will be made to your contacts." buttons {"OK"} default button "OK"
+	else
+		display dialog "Simulation mode DISABLED. Changes will be applied to your contacts." buttons {"OK"} default button "OK"
+	end if
+	
+	-- Log user acknowledgment
+	if utilitiesScript is not missing value then
+		cmLogInfo("User acknowledged simulation mode change dialog")
+	end if
+	
+	-- Return the new mode status for reference by caller
+	return testMode
+end toggleSimulationMode
+
+-- ==============================================
+-- STATISTICS MANAGEMENT MENU
+-- ==============================================
+
+-- =============================================================================
+-- Handler: handleStatisticsManagement
+-- VERSION: 0.9.0-alpha2 (2025-05-21)
+-- PURPOSE: Manage statistics features with added pipeline comparison
+-- INPUTS:  None
+-- RETURNS: Empty string to return to menu, or "exit_script"
+-- =============================================================================
+on handleStatisticsManagement()
+	-- Initialize return value
+	set operationResult to ""
+	
+	-- Log entry to function with module context
+	if utilitiesScript is not missing value then
+		cmLogInfo("Entering Statistics Management menu")
+	else
+		log "Entering Statistics Management menu"
+	end if
+	
+	-- Statistics management dialog - text matches the 3 available buttons
+	set statsText to "Statistics Management:" & return & return
+	set statsText to statsText & "Select from the following options:" & return & return
+	set statsText to statsText & "• View Statistics: See current optimization statistics" & return
+	set statsText to statsText & "• Pipeline Comparison: Compare v1 and v2 pipelines" & return
+	
+	-- Updated menu options - new layout with pipeline comparison
+	set statsChoice to button returned of (display dialog statsText with title "Statistics Management" buttons {"Go Back", "Pipeline Comparison", "View Statistics"} default button "View Statistics")
+	
+	-- Log user's selection with proper context
+	if utilitiesScript is not missing value then
+		cmLogInfo("User selected: " & statsChoice & " in Statistics Management")
+	else
+		log "User selected: " & statsChoice & " in Statistics Management"
+	end if
+	
+	-- Handle Go Back
+	if statsChoice is "Go Back" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User returning to previous menu from Statistics Management")
+		end if
+		return operationResult
+	end if
+	
+	-- Handle view statistics (unchanged)
+	if statsChoice is "View Statistics" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("User requested to view optimization statistics")
+		end if
+		
+		-- Check if ContactOperations module is available
+		if contactOpsScript is missing value then
+			if utilitiesScript is not missing value then
+				cmLogError("Cannot view statistics - ContactOperations module not available")
+			end if
+			
+			display dialog "Statistics module not available." with title "Module Error" buttons {"OK"} default button "OK" with icon stop
+			return handleStatisticsManagement()
+		end if
+		
+		-- Get the stats report
+		try
+			if utilitiesScript is not missing value then
+				cmLogInfo("Retrieving cumulative statistics report")
+			end if
+			
+			set statsReport to contactOpsScript's getCumulativeStatsReport()
+			
+			if utilitiesScript is not missing value then
+				cmLogInfo("Statistics report retrieved successfully")
+			end if
+			
+			-- Show detailed statistics dialog
+			if utilitiesScript is not missing value then
+				cmLogInfo("Displaying statistics report dialog")
+			end if
+			
+			display dialog statsReport with title "Cumulative Optimization Statistics" buttons {"Export", "OK"} default button "OK"
+			
+			-- When user clicks "Export" in stats dialog
+			if button returned of result is "Export" then
+				cmLogInfo("User requested to export statistics report")
+				
+				-- Compose filename and folder using Utilities
+				set timestamp to ""
+				if utilitiesScript is not missing value then
+					set timestamp to utilitiesScript's formatTimestamp(current date)
+				else
+					set currentDate to current date
+					set timestamp to ((year of currentDate) as string) & "-" & ((month of currentDate as integer) as string) & "-" & ((day of currentDate) as string) & "_" & ((hours of currentDate) as string) & "-" & ((minutes of currentDate) as string) & "-" & ((seconds of currentDate) as string)
+				end if
+				
+				set exportFilename to "CCC_Statistics_" & timestamp & ".txt"
+				set exportPath to reportsFolder & exportFilename
+				
+				-- Prepare export text with header and stats
+				set exportText to "Contact Management System - Statistics Export" & return
+				set exportText to exportText & "Date: " & ((current date) as string) & return
+				set exportText to exportText & "Version: " & SYSTEM_VERSION & return & return
+				set exportText to exportText & statsReport
+				
+				-- Try Utilities-based save first, fallback if needed
+				try
+					if utilitiesScript is not missing value then
+						try
+							utilitiesScript's createFolderPath(reportsFolder)
+						end try
+						cmLogInfo("Ensured reports folder exists: " & reportsFolder)
+						-- Touch the file to guarantee alias coercion works (safe even if file exists)
+						try
+							do shell script "touch " & quoted form of (POSIX path of exportPath)
+						end try
+						-- Save the file
+						set saveResult to utilitiesScript's saveTextToFile(exportText, exportPath)
+						
+						if saveResult is true then
+							cmLogInfo("Statistics exported successfully to: " & exportPath)
+							-- Open the exported file in Finder
+							tell application "Finder" to open file exportPath
+							display dialog "Statistics exported successfully." with title "Export Complete" buttons {"OK"} default button "OK"
+						else
+							cmLogError("Failed to save statistics report: " & saveResult)
+							display dialog "Failed to export statistics report." with title "Export Failed" buttons {"OK"} default button "OK" with icon caution
+						end if
+					else
+						-- Fallback if Utilities not available
+						cmLogWarning("Utilities module not available, using direct file access for export.")
+						set exportFile to open for access file exportPath with write permission
+						set eof of exportFile to 0
+						write exportText to exportFile
+						close access exportFile
+						tell application "Finder" to open file exportPath
+						display dialog "Statistics exported to file (fallback)." with title "Export Complete" buttons {"OK"} default button "OK"
+					end if
+				on error exportErr
+					cmLogError("Error exporting statistics report: " & exportErr)
+					display dialog "Error exporting statistics: " & exportErr with title "Export Error" buttons {"OK"} default button "OK" with icon stop
+				end try
+			end if
+			
+		on error statsErr
+			-- Log statistics retrieval error
+			if utilitiesScript is not missing value then
+				cmLogError("Error retrieving statistics: " & statsErr)
+			end if
+			
+			-- Show error dialog
+			display dialog "Error retrieving statistics: " & statsErr with title "Statistics Error" buttons {"OK"} default button "OK" with icon caution
+		end try
+	end if
+	
+	-- Handle Pipeline Comparison (new feature)
+	if statsChoice is "Pipeline Comparison" then
+		set operationResult to handlePipelineComparison()
+		
+		-- Check for exit signal from pipeline comparison
+		if operationResult is "exit_script" then
+			if utilitiesScript is not missing value then
+				cmLogInfo("Exit request received from Pipeline Comparison")
+			end if
+			return "exit_script"
+		end if
+	end if
+	
+	-- Handle More Options submenu
+	if statsChoice is "More Options" then
+		if utilitiesScript is not missing value then
+			cmLogInfo("Entering Additional Statistics Options submenu")
+		end if
+		
+		-- Show submenu for additional statistics options
+		set moreStatsText to "Additional Statistics Options:" & return & return
+		set moreStatsText to moreStatsText & "• Rebuild Statistics: Scan all contacts to rebuild stats" & return
+		set moreStatsText to moreStatsText & "• Other Stats Tools: Additional statistical features" & return & return
+		set moreStatsText to moreStatsText & "Choose an option:"
+		
+		set moreChoice to button returned of (display dialog moreStatsText with title "Additional Statistics Options" buttons {"Go Back", "Other Stats Tools", "Rebuild Statistics"} default button "Rebuild Statistics")
+		
+		-- Log the user's submenu choice
+		if utilitiesScript is not missing value then
+			cmLogInfo("User selected: " & moreChoice & " in Additional Statistics Options")
+		end if
+		
+		-- Handle Go Back
+		if moreChoice is "Go Back" then
+			if utilitiesScript is not missing value then
+				cmLogInfo("Returning to Statistics Management from Additional Options")
+			end if
+			return handleStatisticsManagement()
+		end if
+		
+		-- Handle Other Stats Tools placeholder
+		if moreChoice is "Other Stats Tools" then
+			if utilitiesScript is not missing value then
+				cmLogInfo("User selected Other Stats Tools (feature placeholder)")
+			end if
+			
+			-- Simple placeholder for future features
+			display dialog "Additional statistics tools will be implemented in the next version." with title "Feature Notice" buttons {"OK"} default button "OK"
+			
+			-- Return to the Statistics Management menu
+			return handleStatisticsManagement()
+		end if
+		
+		-- Handle Rebuild Statistics
+		if moreChoice is "Rebuild Statistics" then
+			if utilitiesScript is not missing value then
+				cmLogInfo("User selected to rebuild statistics")
+			end if
+			
+			-- Check if ContactOperations module is available
+			if contactOpsScript is missing value then
+				if utilitiesScript is not missing value then
+					cmLogError("Cannot rebuild statistics - ContactOperations module not available")
+				end if
+				
+				display dialog "Statistics module not available." with title "Module Error" buttons {"OK"} default button "OK" with icon stop
+				return handleStatisticsManagement()
+			end if
+			
+			-- Confirm before long operation
+			if utilitiesScript is not missing value then
+				cmLogInfo("Displaying rebuild confirmation dialog")
+			end if
+			
+			set confirmRebuild to button returned of (display dialog "This will scan all contacts in your address book to rebuild statistics. This may take some time with large address books. Continue?" with title "Confirm Rebuild" buttons {"Cancel", "Continue"} default button "Continue")
+			
+			-- Log user's confirmation choice
+			if utilitiesScript is not missing value then
+				cmLogInfo("User selected: " & confirmRebuild & " for statistics rebuild")
+			end if
+			
+			if confirmRebuild is "Continue" then
+				-- Show that the operation is starting
+				if utilitiesScript is not missing value then
+					cmLogInfo("Beginning statistics rebuild operation")
+				end if
+				
+				display notification "Starting statistics rebuild..." with title "Rebuilding Statistics"
+				
+				-- Call the rebuild function
+				try
+					if utilitiesScript is not missing value then
+						cmLogInfo("Calling rebuildCumulativeStats in ContactOperations")
+					end if
+					
+					set rebuildResult to contactOpsScript's rebuildCumulativeStats()
+					
+					-- Show results
+					if rebuildResult's success then
+						if utilitiesScript is not missing value then
+							cmLogInfo("Statistics rebuild completed successfully - scanned " & rebuildResult's scannedContacts & " contacts")
+						end if
+						
+						-- Format result text
+						set resultText to "Statistics rebuild complete!" & return & return
+						set resultText to resultText & "• Contacts scanned: " & rebuildResult's scannedContacts & return
+						set resultText to resultText & "• CCC contacts found: " & rebuildResult's cccContacts & return
+						
+						-- Add the rebuilt stats
+						set resultText to resultText & return & "Updated Statistics:" & return
+						set resultText to resultText & "• Total contacts optimized: " & rebuildResult's stats's totalContacts & return
+						set resultText to resultText & "• Total characters saved: " & rebuildResult's stats's totalChars & return
+						set resultText to resultText & "• Average savings: " & ((round ((rebuildResult's stats's avgCharsPerContact) * 10)) / 10) & " characters per contact"
+						
+						if utilitiesScript is not missing value then
+							cmLogInfo("Displaying rebuild success dialog")
+						end if
+						
+						display dialog resultText with title "Statistics Rebuild Complete" buttons {"OK"} default button "OK"
+					else
+						-- Log rebuild failure
+						if utilitiesScript is not missing value then
+							cmLogError("Statistics rebuild failed: " & rebuildResult's reason)
+						end if
+						
+						display dialog "Error rebuilding statistics: " & rebuildResult's reason with title "Rebuild Error" buttons {"OK"} default button "OK" with icon caution
+					end if
+				on error rebuildErr
+					-- Log rebuild error
+					if utilitiesScript is not missing value then
+						cmLogError("Error in statistics rebuild: " & rebuildErr)
+					end if
+					
+					display dialog "An error occurred while rebuilding statistics: " & rebuildErr with title "Rebuild Error" buttons {"OK"} default button "OK" with icon stop
+				end try
+			else
+				-- Log rebuild cancellation
+				if utilitiesScript is not missing value then
+					cmLogInfo("Statistics rebuild cancelled by user")
+				end if
+			end if
+		end if
+	end if
+	
+	-- Log returning to the statistics management menu (recursion)
+	if utilitiesScript is not missing value then
+		cmLogInfo("Returning to Statistics Management menu")
+	end if
+	
+	-- Return to statistics management menu
+	return handleStatisticsManagement()
+end handleStatisticsManagement
+
+-- ==============================================
+-- MAIN ENTRY POINT
+-- ==============================================
+
+-------------------------------------------------------------------------------
+--  run()                             ▸  Entrypoint
+--  v6.0.0-beta1-mergedInit  (2025-05-12)
+-------------------------------------------------------------------------------
+on run {}
+	------------------------------------------------------------
+	-- 0 ▸  Full initialization (covers steps 1–4 + backup + self-test)
+	------------------------------------------------------------
+	if not initializeSystem() then
+		-- initializeSystem handles its own errors & dialogs
+		return "Initialization failed."
+	end if
+	
+	cmLogInfo("System initialization completed successfully")
+	
+	------------------------------------------------------------
+	-- 1 ▸  Welcome dialog
+	------------------------------------------------------------
+	
+	cmLogInfo("Displaying welcome message")
+	display dialog "Welcome to " & scriptName & " !" & return & return & ¬
+		"This script suite provides utilities for the macOS Contacts app." & return & return & ¬
+		¬
+			"⚠️  Please back up your Contacts database before making changes." with title scriptTitle buttons {"Exit", "Continue"} default button "Continue"
+	set initialChoice to button returned of result
+	cmLogInfo("User selected: " & initialChoice & " at welcome screen")
+	if initialChoice is "Exit" then
+		cmLogInfo("User canceled script at welcome screen")
+		return "Script canceled by user."
+	end if
+	
+	------------------------------------------------------------
+	-- 2 ▸  Main menu loop
+	------------------------------------------------------------
+	cmLogInfo("Entering main application loop")
+	repeat until shouldExitScript
+		cmLogDebug("Displaying main menu (loop iteration)")
+		set menuResult to my showMainMenu()
+		
+		if menuResult is "clean_contacts" then
+			cmLogInfo("Dispatch → Contact Cleaning")
+			my handleContactCleaning()
+			
+		else if menuResult is "group_management" then
+			cmLogInfo("Dispatch → Group Management")
+			my handleGroupManagement()
+			
+		else if menuResult is "tools_settings" then
+			cmLogInfo("Dispatch → Tools & Settings")
+			my handleToolsAndSettings()
+			
+		else if menuResult is "exit_script" then
+			cmLogInfo("Exit requested – terminating loop")
+			exit repeat
+		end if
+	end repeat
+	
+	------------------------------------------------------------
+	-- 3 ▸  Final cleanup & exit
+	------------------------------------------------------------
+	cmLogInfo("Script execution completed successfully")
+	return "Script completed successfully."
+end run
+
